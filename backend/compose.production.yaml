@@ -1,0 +1,157 @@
+name: sullyos-backend-production
+
+x-backend-image: &backend-image
+  image: sullyos-backend:${SULLYOS_IMAGE_TAG:-production}
+  build:
+    context: .
+
+x-backend-environment: &backend-environment
+  DATABASE_URL: postgresql://${POSTGRES_USER:-sullyos}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-sullyos}
+  HOST: 0.0.0.0
+  PORT: 4310
+  APP_TOKEN: ${APP_TOKEN:?APP_TOKEN is required}
+  ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?ALLOWED_ORIGINS is required}
+  MODEL_BASE_URL: ${MODEL_BASE_URL:-}
+  MODEL_API_KEY: ${MODEL_API_KEY:-}
+  MODEL_NAME: ${MODEL_NAME:-}
+  MODEL_TEMPERATURE: ${MODEL_TEMPERATURE:-0.85}
+  MODEL_MAX_TOKENS: ${MODEL_MAX_TOKENS:-8000}
+  MODEL_TIMEOUT_MS: ${MODEL_TIMEOUT_MS:-300000}
+  MODEL_VAULT_KEY: ${MODEL_VAULT_KEY:?MODEL_VAULT_KEY is required}
+  MODEL_FAILURE_COOLDOWN_MS: ${MODEL_FAILURE_COOLDOWN_MS:-300000}
+  HEARTBEAT_POLL_MS: ${HEARTBEAT_POLL_MS:-30000}
+  HEARTBEAT_DEMO_MODE: "false"
+  VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+  VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+  VAPID_EMAIL: ${VAPID_EMAIL:-mailto:admin@example.com}
+
+x-json-logging: &json-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
+x-backend-hardening: &backend-hardening
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging: *json-logging
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sullyos}
+      POSTGRES_USER: ${POSTGRES_USER:-sullyos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sullyos} -d ${POSTGRES_DB:-sullyos}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    logging: *json-logging
+
+  migrate:
+    <<: [*backend-image, *backend-hardening]
+    restart: "no"
+    command: ["node", "dist/migrate.js"]
+    environment: *backend-environment
+    networks:
+      - database
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: [*backend-image, *backend-hardening]
+    restart: unless-stopped
+    command: ["node", "dist/api.js"]
+    environment: *backend-environment
+    expose:
+      - "4310"
+    networks:
+      - app
+      - database
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:4310/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    stop_grace_period: 30s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      SULLYOS_DOMAIN: ${SULLYOS_DOMAIN:?SULLYOS_DOMAIN is required}
+      SULLYOS_TLS_EMAIL: ${SULLYOS_TLS_EMAIL:?SULLYOS_TLS_EMAIL is required}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../sullyos-frontend:/srv:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - edge
+      - app
+    depends_on:
+      api:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    logging: *json-logging
+
+  worker:
+    profiles: ["heartbeat"]
+    <<: [*backend-image, *backend-hardening]
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    environment: *backend-environment
+    networks:
+      - app
+      - database
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 30s
+
+networks:
+  edge:
+  app:
+  database:
+    internal: true
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

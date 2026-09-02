@@ -1,0 +1,18 @@
+[Unit]
+Description=Create a SullyOS PostgreSQL production backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+SupplementaryGroups=docker
+WorkingDirectory=/opt/sullyos-backend
+ExecStart=/usr/bin/bash /opt/sullyos-backend/scripts/backup-database.sh --production
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the SullyOS database backup every day
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+Persistent=true
+RandomizedDelaySec=20m
+Unit=sullyos-backup.service
+
+[Install]
+WantedBy=timers.target

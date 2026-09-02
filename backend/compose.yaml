@@ -1,0 +1,81 @@
+name: sullyos-backend
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sullyos}
+      POSTGRES_USER: ${POSTGRES_USER:-sullyos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-this-local-password}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-54329}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sullyos} -d ${POSTGRES_DB:-sullyos}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: .
+    restart: "no"
+    command: ["node", "dist/migrate.js"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sullyos}:${POSTGRES_PASSWORD:-change-this-local-password}@postgres:5432/${POSTGRES_DB:-sullyos}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    restart: unless-stopped
+    command: ["node", "dist/api.js"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sullyos}:${POSTGRES_PASSWORD:-change-this-local-password}@postgres:5432/${POSTGRES_DB:-sullyos}
+      HOST: 0.0.0.0
+      PORT: 4310
+      APP_TOKEN: ${APP_TOKEN:-change-this-local-token}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173,http://127.0.0.1:5173}
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_NAME: ${MODEL_NAME:-}
+      MODEL_TEMPERATURE: ${MODEL_TEMPERATURE:-0.85}
+      MODEL_MAX_TOKENS: ${MODEL_MAX_TOKENS:-8000}
+      MODEL_TIMEOUT_MS: ${MODEL_TIMEOUT_MS:-300000}
+      MODEL_VAULT_KEY: ${MODEL_VAULT_KEY:-}
+      MODEL_FAILURE_COOLDOWN_MS: ${MODEL_FAILURE_COOLDOWN_MS:-300000}
+    ports:
+      - "127.0.0.1:${API_PORT:-43210}:4310"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    profiles: ["heartbeat-preview"]
+    build: .
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sullyos}:${POSTGRES_PASSWORD:-change-this-local-password}@postgres:5432/${POSTGRES_DB:-sullyos}
+      APP_TOKEN: ${APP_TOKEN:-change-this-local-token}
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_NAME: ${MODEL_NAME:-}
+      MODEL_TEMPERATURE: ${MODEL_TEMPERATURE:-0.85}
+      MODEL_MAX_TOKENS: ${MODEL_MAX_TOKENS:-8000}
+      MODEL_TIMEOUT_MS: ${MODEL_TIMEOUT_MS:-300000}
+      MODEL_VAULT_KEY: ${MODEL_VAULT_KEY:-}
+      MODEL_FAILURE_COOLDOWN_MS: ${MODEL_FAILURE_COOLDOWN_MS:-300000}
+      HEARTBEAT_POLL_MS: ${HEARTBEAT_POLL_MS:-30000}
+      HEARTBEAT_DEMO_MODE: ${HEARTBEAT_DEMO_MODE:-false}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_EMAIL: ${VAPID_EMAIL:-mailto:admin@example.com}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
