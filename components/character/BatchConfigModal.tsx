@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { X, CheckSquare, Square, Lightning, Clock, ArrowsClockwise, BookOpenText } from '@phosphor-icons/react';
+import { X, CheckSquare, Square, Lightning, Clock, ArrowsClockwise, BookOpenText, CaretDown, CaretRight } from '@phosphor-icons/react';
 import type { CharacterProfile, ApiPreset, Worldbook } from '../../types';
 import { configFromPreset } from '../../utils/apiPresetSwitch';
 import { toMountedWorldbook } from '../../utils/worldbook';
@@ -51,6 +51,52 @@ const BatchConfigModal: React.FC<BatchConfigModalProps> = ({ characters, apiPres
     // 世界书挂载
     const [wbSelectedIds, setWbSelectedIds] = useState<Set<string>>(new Set());
     const [wbMode, setWbMode] = useState<'append' | 'replace'>('append');
+    // 分组挂载：默认按分组展示，可展开组内勾选单本（挂载一整组 / 单条目并存）
+    const [wbGroupView, setWbGroupView] = useState<'grouped' | 'flat'>('grouped');
+    const [wbExpandedGroups, setWbExpandedGroups] = useState<Set<string>>(new Set());
+
+    // 世界书按 category 分组（与角色挂载弹窗同语义：空 category 归「未分类设定 (General)」）
+    const wbGroups = useMemo(() => {
+        const groups: Array<{ category: string; books: typeof worldbooks }> = [];
+        const index = new Map<string, number>();
+        worldbooks.forEach(b => {
+            const cat = (b.category || '').trim() || '未分类设定 (General)';
+            if (!index.has(cat)) {
+                index.set(cat, groups.length);
+                groups.push({ category: cat, books: [] });
+            }
+            groups[index.get(cat)!].books.push(b);
+        });
+        return groups;
+    }, [worldbooks]);
+
+    const toggleWb = (id: string) => {
+        setWbSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+
+    const toggleWbGroup = (category: string) => {
+        const books = wbGroups.find(g => g.category === category)?.books || [];
+        const allHeld = books.every(b => wbSelectedIds.has(b.id));
+        setWbSelectedIds(prev => {
+            const next = new Set(prev);
+            books.forEach(b => { if (allHeld) next.delete(b.id); else next.add(b.id); });
+            return next;
+        });
+    };
+
+    const toggleWbGroupExpand = (category: string) => {
+        setWbExpandedGroups(prev => {
+            const next = new Set(prev);
+            if (next.has(category)) next.delete(category);
+            else next.add(category);
+            return next;
+        });
+    };
 
     const toggleChar = (id: string) => {
         setSelectedIds(prev => {
@@ -252,18 +298,86 @@ const BatchConfigModal: React.FC<BatchConfigModalProps> = ({ characters, apiPres
                                 )}
                                 <div>
                                     <div className="flex items-center justify-between mb-1.5">
-                                        <span className="text-[10px] text-slate-400">选择世界书（已选 {wbSelectedIds.size}/{worldbooks.length}）</span>
-                                        {worldbooks.length > 0 && (
-                                            <button
-                                                onClick={() => setWbSelectedIds(wbSelectedIds.size === worldbooks.length ? new Set() : new Set(worldbooks.map(b => b.id)))}
-                                                className="text-[10px] font-bold text-violet-500 hover:text-violet-600 active:scale-95 transition-transform"
-                                            >
-                                                {wbSelectedIds.size === worldbooks.length ? '全不选' : '全选'}
-                                            </button>
-                                        )}
+                                        <span className="text-[10px] text-slate-400">
+                                            选择世界书（已选 {wbSelectedIds.size}/{worldbooks.length}）
+                                            {wbGroupView === 'grouped' && wbGroups.length > 1 && ' · 点分组头挂载整组，展开可勾单本'}
+                                        </span>
+                                        <div className="flex items-center gap-2.5">
+                                            {worldbooks.length > 0 && (
+                                                <>
+                                                    <button
+                                                        onClick={() => setWbGroupView(wbGroupView === 'grouped' ? 'flat' : 'grouped')}
+                                                        className="text-[10px] font-bold text-slate-400 hover:text-violet-500 active:scale-95 transition-transform"
+                                                    >
+                                                        {wbGroupView === 'grouped' ? '平铺列表' : '按分组'}
+                                                    </button>
+                                                    <button
+                                                        onClick={() => setWbSelectedIds(wbSelectedIds.size === worldbooks.length ? new Set() : new Set(worldbooks.map(b => b.id)))}
+                                                        className="text-[10px] font-bold text-violet-500 hover:text-violet-600 active:scale-95 transition-transform"
+                                                    >
+                                                        {wbSelectedIds.size === worldbooks.length ? '全不选' : '全选'}
+                                                    </button>
+                                                </>
+                                            )}
+                                        </div>
                                     </div>
                                     {worldbooks.length === 0 ? (
                                         <p className="text-[10px] text-slate-400 text-center py-3">还没有世界书。去「世界书」App 先建一本。</p>
+                                    ) : wbGroupView === 'grouped' ? (
+                                        <div className="max-h-56 overflow-y-auto pr-1 space-y-1.5">
+                                            {wbGroups.map(group => {
+                                                const allHeld = group.books.every(b => wbSelectedIds.has(b.id));
+                                                const someHeld = group.books.some(b => wbSelectedIds.has(b.id));
+                                                const isExpanded = wbExpandedGroups.has(group.category);
+                                                return (
+                                                    <div key={group.category} className="rounded-xl border border-slate-100 bg-white overflow-hidden">
+                                                        <div className="flex items-center">
+                                                            <button
+                                                                onClick={() => toggleWbGroupExpand(group.category)}
+                                                                className="flex items-center gap-1.5 pl-2.5 pr-1 py-2 text-slate-400 hover:text-slate-600 active:scale-95 transition-transform"
+                                                            >
+                                                                {isExpanded
+                                                                    ? <CaretDown className="w-3 h-3" weight="fill" />
+                                                                    : <CaretRight className="w-3 h-3" weight="fill" />}
+                                                            </button>
+                                                            <button
+                                                                onClick={() => toggleWbGroup(group.category)}
+                                                                className="flex items-center gap-2 flex-1 min-w-0 py-2 pr-2.5 text-left active:scale-[0.99] transition-transform"
+                                                            >
+                                                                {allHeld
+                                                                    ? <CheckSquare className="w-4 h-4 text-violet-500 shrink-0" weight="fill" />
+                                                                    : <Square className={`w-4 h-4 shrink-0 ${someHeld ? 'text-violet-300' : 'text-slate-300'}`} />}
+                                                                <span className={`text-xs font-bold truncate ${allHeld ? 'text-violet-600' : 'text-slate-600'}`}>{group.category}</span>
+                                                                <span className="text-[9px] text-slate-400 shrink-0">{allHeld ? `${group.books.length} 本已选` : `${group.books.length} 本`}</span>
+                                                            </button>
+                                                        </div>
+                                                        {isExpanded && (
+                                                            <div className="grid grid-cols-2 gap-1.5 px-2 pb-2">
+                                                                {group.books.map(book => {
+                                                                    const checked = wbSelectedIds.has(book.id);
+                                                                    return (
+                                                                        <button
+                                                                            key={book.id}
+                                                                            onClick={() => toggleWb(book.id)}
+                                                                            className={`flex items-center gap-2 p-2 rounded-lg border transition-all text-left ${
+                                                                                checked
+                                                                                    ? 'bg-violet-50/80 border-violet-300'
+                                                                                    : 'bg-slate-50/50 border-slate-100 hover:border-violet-200'
+                                                                            }`}
+                                                                        >
+                                                                            {checked
+                                                                                ? <CheckSquare className="w-3.5 h-3.5 text-violet-500 shrink-0" weight="fill" />
+                                                                                : <Square className="w-3.5 h-3.5 text-slate-300 shrink-0" />}
+                                                                            <div className="text-xs font-bold truncate text-slate-600">{book.title}</div>
+                                                                        </button>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
                                     ) : (
                                         <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-1">
                                             {worldbooks.map(book => {
@@ -271,12 +385,7 @@ const BatchConfigModal: React.FC<BatchConfigModalProps> = ({ characters, apiPres
                                                 return (
                                                     <button
                                                         key={book.id}
-                                                        onClick={() => setWbSelectedIds(prev => {
-                                                            const next = new Set(prev);
-                                                            if (next.has(book.id)) next.delete(book.id);
-                                                            else next.add(book.id);
-                                                            return next;
-                                                        })}
+                                                        onClick={() => toggleWb(book.id)}
                                                         className={`flex items-center gap-2 p-2.5 rounded-xl border transition-all text-left ${
                                                             checked
                                                                 ? 'bg-violet-50/80 border-violet-300 shadow-sm'
