@@ -542,6 +542,10 @@ const Settings: React.FC = () => {
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [isLoadingVisionModels, setIsLoadingVisionModels] = useState(false);
   const [newPresetName, setNewPresetName] = useState('');
+  // 新建预设一律从空白开始填：不继承当前生效的地址/密钥/模型，免得手一快把旧配置又存成一条新预设。
+  const [newPresetUrl, setNewPresetUrl] = useState('');
+  const [newPresetKey, setNewPresetKey] = useState('');
+  const [newPresetModel, setNewPresetModel] = useState('');
   // 就地编辑某条预设：只改预设本身；改的正好是当前生效那条时，生效配置一并跟着走
   const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
   const [editPresetName, setEditPresetName] = useState('');
@@ -1122,14 +1126,21 @@ const Settings: React.FC = () => {
           addToast('请输入预设名称', 'error');
           return;
       }
+      if (!newPresetUrl.trim()) {
+          addToast('请输入 URL', 'error');
+          return;
+      }
       addApiPreset(newPresetName, {
-        baseUrl: normalizeApiBaseUrl(localUrl),
-        apiKey: normalizeApiCredential(localKey),
-        model: normalizeApiModel(localModel),
-        stream: localStream,
-        temperature: localTemperature,
+        baseUrl: normalizeApiBaseUrl(newPresetUrl),
+        apiKey: normalizeApiCredential(newPresetKey),
+        model: normalizeApiModel(newPresetModel),
+        stream: false,
+        temperature: 0.85,
       });
       setNewPresetName('');
+      setNewPresetUrl('');
+      setNewPresetKey('');
+      setNewPresetModel('');
       setShowPresetModal(false);
       addToast('预设已保存', 'success');
   };
@@ -2334,7 +2345,7 @@ const Settings: React.FC = () => {
                 </div>
             }
             actions={
-                <button onClick={() => { setNewPresetName(''); setShowPresetModal(true); }} className="text-[10px] bg-slate-100 text-slate-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
+                <button onClick={() => { setNewPresetName(''); setNewPresetUrl(''); setNewPresetKey(''); setNewPresetModel(''); setShowPresetModal(true); }} className="text-[10px] bg-slate-100 text-slate-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
                     新建预设
                 </button>
             }
@@ -4053,10 +4064,24 @@ const Settings: React.FC = () => {
 
       {/* Preset Name Modal */}
       <Modal isOpen={showPresetModal} title="新建预设" onClose={() => setShowPresetModal(false)} footer={<button onClick={handleSavePreset} className="w-full py-3 bg-primary text-white font-bold rounded-2xl">新建</button>}>
-          <div className="space-y-2">
-              <label className="text-[10px] font-bold text-slate-400 uppercase">预设名称 (例如: DeepSeek)</label>
-              <input value={newPresetName} onChange={e => setNewPresetName(e.target.value)} className="w-full bg-slate-100 rounded-xl px-4 py-3 text-sm focus:outline-primary" autoFocus placeholder="Name..." />
-              <p className="text-[10px] text-slate-400 leading-relaxed pt-1">会保存上面表单里的 URL / Key / Model，以及高级设置中的流式与温度。</p>
+          <div className="space-y-3">
+              <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">预设名称 (例如: DeepSeek)</label>
+                  <input value={newPresetName} onChange={e => setNewPresetName(e.target.value)} className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm focus:outline-primary" autoFocus placeholder="Name..." />
+              </div>
+              <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">URL</label>
+                  <input value={newPresetUrl} onChange={e => setNewPresetUrl(e.target.value)} placeholder="https://..." className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-primary" />
+              </div>
+              <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">API Key</label>
+                  <input type="password" value={newPresetKey} onChange={e => setNewPresetKey(e.target.value)} placeholder="sk-..." className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-primary" />
+              </div>
+              <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Model</label>
+                  <input value={newPresetModel} onChange={e => setNewPresetModel(e.target.value)} placeholder="model-name" className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-primary" />
+              </div>
+              <p className="text-[10px] text-slate-400 leading-relaxed pt-1">这四栏都从空白开始填，不会带入当前生效的配置。留空的 Key / Model 就是空的。</p>
           </div>
       </Modal>
 
