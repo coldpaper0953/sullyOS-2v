@@ -141,7 +141,7 @@ type InstantToolUiStatus = {
 };
 
 const Chat: React.FC = () => {
-    const { characters, activeCharacterId, setActiveCharacterId, addCharacter, updateCharacter, apiConfig, updateApiConfig, apiPresets, availableModels, addApiPreset, closeApp, customThemes, addCustomTheme, removeCustomTheme, addWorldbook, updateTheme, saveAppearancePreset, addToast, showError, userProfile, lastMsgTimestamp, groups, characterGroups, clearUnread, unreadMessages, realtimeConfig, memoryPalaceConfig, updateMemoryPalaceConfig, remoteVectorConfig, syncEmotionApiToAllCharacters, theme: osTheme, proactiveComposingChars, openDateWithChar } = useOS();
+    const { characters, activeCharacterId, setActiveCharacterId, addCharacter, updateCharacter, apiConfig, updateApiConfig, apiPresets, availableModels, addApiPreset, closeApp, customThemes, addCustomTheme, removeCustomTheme, addWorldbook, updateTheme, saveAppearancePreset, addToast, showError, userProfile, lastMsgTimestamp, groups, characterGroups, clearUnread, unreadMessages, realtimeConfig, memoryPalaceConfig, updateMemoryPalaceConfig, remoteVectorConfig, syncEmotionApiToAllCharacters, theme: osTheme, proactiveComposingChars, openDateWithChar, registerBackHandler } = useOS();
     const isProactiveComposing = !!(activeCharacterId && proactiveComposingChars[activeCharacterId]);
     // 顶栏快捷切换 API 的「使用中」识别：与设置页同源（按三件套值比对，手改配置后不会说谎）
     const chatActivePresetId = useMemo(
@@ -236,6 +236,18 @@ const Chat: React.FC = () => {
     const [allHistoryMessages, setAllHistoryMessages] = useState<Message[]>([]);
     const [transferAmt, setTransferAmt] = useState('');
     const [transferNote, setTransferNote] = useState('');
+
+    // 返回键「回退上一级」：小剧场/弹层/装扮面板/输入区扩展面板/回复引用逐层收起，
+    // 而不是一按返回就退回桌面。全部收完返回 false 交回默认（关 App）。
+    useEffect(() => registerBackHandler(() => {
+        if (theaterSlotIdx !== null) { setTheaterSlotIdx(null); return true; }
+        if (modalType !== 'none') { setModalType('none'); return true; }
+        if (fineTunePanelOpen) { setFineTunePanelOpen(false); return true; }
+        if (fineTuneOpen) { setFineTuneOpen(false); return true; }
+        if (showPanel !== 'none') { setShowPanel('none'); return true; }
+        if (replyTarget) { setReplyTarget(null); return true; }
+        return false;
+    }), [registerBackHandler, theaterSlotIdx, modalType, fineTuneOpen, fineTunePanelOpen, showPanel, replyTarget]);
     const [emojiImportText, setEmojiImportText] = useState('');
     const [settingsContextLimit, setSettingsContextLimit] = useState(500);
     const [settingsContextRangeMode, setSettingsContextRangeMode] = useState<ContextRangeMode>('manual');

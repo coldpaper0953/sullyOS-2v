@@ -34,7 +34,7 @@ const fmtTime = (ts: number) => {
 };
 
 const CloudSyncSettings: React.FC = () => {
-    const { exportSystem, importSystem, addToast } = useOS();
+    const { exportSystem, importSystem, addToast, characters } = useOS();
     const [open, setOpen] = useState(false);
     const [config, setConfig] = useState<CloudSyncConfig>(() => loadCloudSyncConfig());
     const [session, setSession] = useState(() => loadCloudSyncSession());
@@ -95,9 +95,39 @@ const CloudSyncSettings: React.FC = () => {
             try { sessionStorage.setItem('os_cloud_sync_pass_v1', password); } catch { /* 隐私模式等场景静默跳过 */ }
             trackEvent(mode === 'signup' ? '云同步注册' : '云同步登录');
             addToast(mode === 'signup' ? '注册并登录成功' : '登录成功', 'success');
+
+            // —— 登录即同步（无感）：换设备登录进来数据就在，没有手动上传/恢复步骤 ——
+            // 本地没有角色（新设备/新浏览器）→ 自动把云端数据拉回来（含 API 配置）；
+            // 本地已有数据 → 本机就是最新，直接推上去完成首次备份。
+            setBusy('sync');
+            void (async () => {
+                try {
+                    const meta = await cloudSyncPeek(config, next).catch(() => null);
+                    const localEmpty = characters.length === 0;
+                    if (meta && localEmpty) {
+                        setStatus('检测到新设备：正在从云端同步数据…');
+                        const zipBlob = await cloudSyncPull(config, next, password, msg => setStatus(msg));
+                        await importSystem(new File([zipBlob], 'sully_cloud_sync.zip', { type: 'application/zip' }));
+                        addToast('已自动同步云端数据（含 API 配置）', 'success');
+                        setStatus('✅ 云端数据已同步，即将刷新生效');
+                        setTimeout(() => window.location.reload(), 1200);
+                        return;
+                    }
+                    // 本地有数据 / 云端为空：推一份上去
+                    setStatus('正在备份数据到云端…');
+                    const zipBlob = await exportSystem('text_only');
+                    const { gzipBytes } = await cloudSyncPush(config, next, { zipBlob, password, onProgress: msg => setStatus(msg) });
+                    setStatus(`✅ 已同步到云端（加密后 ${fmtBytes(gzipBytes)}），平时自动同步，无需手动操作`);
+                    const freshMeta = await cloudSyncPeek(config, next).catch(() => null);
+                    if (freshMeta) setRemote(freshMeta);
+                } catch (e) {
+                    setStatus(`⚠️ 自动同步未完成：${e instanceof Error ? e.message : '未知错误'}（数据仍在本地，可在下方手动重试）`);
+                } finally {
+                    setBusy(null);
+                }
+            })();
         } catch (e) {
             setStatus(`❌ ${e instanceof Error ? e.message : '操作失败'}`);
-        } finally {
             setBusy(null);
         }
     };
@@ -178,7 +208,7 @@ const CloudSyncSettings: React.FC = () => {
 
             {open && <div className="space-y-3">
                 <p className="text-xs text-slate-500 leading-relaxed">
-                    注册一个账号（邮箱+密码），本机全部数据（角色、聊天、设置、API 配置）加密后存到云端；换设备登录同一账号即可一键拉回。数据行按账号行级隔离，100% 只属于你。
+                    注册一个账号（邮箱+密码），数据自动同步到云端（含 API 配置）；换设备登录同一账号，数据自动回来。平时全程自动，无需手动上传/恢复。
                 </p>
 
                 {/* 连接配置：内置官方服务器，默认无需填写；收进折叠里供自部署用户替换 */}
@@ -238,49 +268,59 @@ const CloudSyncSettings: React.FC = () => {
                     </div>
                 )}
 
-                {/* 已登录：云端状态 + 推/拉 */}
+                {/* 已登录：平时全自动（页面隐藏自动推云端、换设备登录自动拉回），手动操作收进高级 */}
                 {connected && session && (
                     <div className="space-y-2.5">
                         <div className="rounded-2xl bg-slate-50/70 border border-slate-100 p-3 text-[11px] text-slate-600 space-y-1">
                             <div className="flex justify-between"><span className="text-slate-400">账号</span><span className="font-bold">{session.email}</span></div>
-                            <div className="flex justify-between"><span className="text-slate-400">云端备份</span><span className="font-bold">{remote ? `${fmtBytes(remote.gzipBytes)} · ${fmtTime(remote.pushedAt)}` : '还没有'}</span></div>
-                            {remote?.deviceLabel && <div className="flex justify-between gap-3"><span className="text-slate-400 shrink-0">最后上传设备</span><span className="truncate font-mono text-slate-500">{remote.deviceLabel}</span></div>}
+                            <div className="flex justify-between"><span className="text-slate-400">云端数据</span><span className="font-bold">{remote ? `${fmtBytes(remote.gzipBytes)} · ${fmtTime(remote.pushedAt)}` : '还没有'}</span></div>
+                            {remote?.deviceLabel && <div className="flex justify-between gap-3"><span className="text-slate-400 shrink-0">最后同步设备</span><span className="truncate font-mono text-slate-500">{remote.deviceLabel}</span></div>}
                         </div>
-                        {session && !cryptoPassword && (
-                            <div className="rounded-2xl border border-amber-100 bg-amber-50/70 p-3 space-y-2">
-                                <p className="text-[10px] text-amber-600 leading-relaxed">
-                                    🔒 备份采用端到端加密（AES-256-GCM，密钥由你的账号密码在浏览器内派生），口令不落盘、页面刷新后即锁定。请重新输入一次账号密码解锁上传/恢复：
-                                </p>
+                        {busy === 'sync' && (
+                            <div className="rounded-2xl bg-violet-50/70 border border-violet-100 px-3 py-2 text-[11px] text-violet-600 font-bold animate-pulse">
+                                {status || '正在自动同步…'}
+                            </div>
+                        )}
+                        <details className="rounded-2xl bg-slate-50/70 border border-slate-100">
+                            <summary className="px-3 py-2 text-[11px] font-bold text-slate-400 cursor-pointer select-none">高级操作（手动上传/恢复）</summary>
+                            <div className="p-3 pt-0 space-y-2">
+                                {session && !cryptoPassword && (
+                                    <div className="rounded-2xl border border-amber-100 bg-amber-50/70 p-3 space-y-2">
+                                        <p className="text-[10px] text-amber-600 leading-relaxed">
+                                            🔒 备份采用端到端加密（AES-256-GCM，密钥由你的账号密码在浏览器内派生），口令不落盘、页面刷新后即锁定。请重新输入一次账号密码解锁手动操作：
+                                        </p>
+                                        <div className="flex gap-2">
+                                            <input
+                                                type="password"
+                                                value={password}
+                                                onChange={e => setPassword(e.target.value)}
+                                                placeholder="账号密码（解锁加密）"
+                                                className="flex-1 bg-white border border-amber-200 rounded-xl px-3 py-2 text-[11px] outline-none focus:border-amber-400"
+                                            />
+                                            <button
+                                                onClick={() => {
+                                                    if (!password) { addToast('请输入账号密码', 'error'); return; }
+                                                    setCryptoPassword(password);
+                                                    try { sessionStorage.setItem('os_cloud_sync_pass_v1', password); } catch { /* ignore */ }
+                                                    addToast('已解锁端到端加密', 'success');
+                                                }}
+                                                className="px-4 py-2 rounded-xl text-[11px] font-bold bg-amber-400 text-white shadow-sm active:scale-95 transition-all"
+                                            >
+                                                解锁
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
                                 <div className="flex gap-2">
-                                    <input
-                                        type="password"
-                                        value={password}
-                                        onChange={e => setPassword(e.target.value)}
-                                        placeholder="账号密码（解锁加密）"
-                                        className="flex-1 bg-white border border-amber-200 rounded-xl px-3 py-2 text-[11px] outline-none focus:border-amber-400"
-                                    />
-                                    <button
-                                        onClick={() => {
-                                            if (!password) { addToast('请输入账号密码', 'error'); return; }
-                                            setCryptoPassword(password);
-                                            try { sessionStorage.setItem('os_cloud_sync_pass_v1', password); } catch { /* ignore */ }
-                                            addToast('已解锁端到端加密', 'success');
-                                        }}
-                                        className="px-4 py-2 rounded-xl text-[11px] font-bold bg-amber-400 text-white shadow-sm active:scale-95 transition-all"
-                                    >
-                                        解锁
+                                    <button onClick={handlePush} disabled={busy === 'push' || !cryptoPassword} className="flex-1 py-2.5 rounded-xl text-xs font-bold bg-violet-500 text-white shadow-sm shadow-violet-200 active:scale-95 transition-all disabled:opacity-50">
+                                        {busy === 'push' ? '加密上传中…' : '⬆ 手动上传本机数据'}
+                                    </button>
+                                    <button onClick={handlePull} disabled={busy === 'pull' || !cryptoPassword} className="flex-1 py-2.5 rounded-xl text-xs font-bold bg-white border border-violet-200 text-violet-600 hover:bg-violet-50 active:scale-95 transition-all disabled:opacity-50">
+                                        {busy === 'pull' ? '解密恢复中…' : '⬇ 手动恢复到本机'}
                                     </button>
                                 </div>
                             </div>
-                        )}
-                        <div className="flex gap-2">
-                            <button onClick={handlePush} disabled={busy === 'push' || !cryptoPassword} className="flex-1 py-2.5 rounded-xl text-xs font-bold bg-violet-500 text-white shadow-sm shadow-violet-200 active:scale-95 transition-all disabled:opacity-50">
-                                {busy === 'push' ? '加密上传中…' : '⬆ 加密上传本机数据'}
-                            </button>
-                            <button onClick={handlePull} disabled={busy === 'pull' || !cryptoPassword} className="flex-1 py-2.5 rounded-xl text-xs font-bold bg-white border border-violet-200 text-violet-600 hover:bg-violet-50 active:scale-95 transition-all disabled:opacity-50">
-                                {busy === 'pull' ? '解密恢复中…' : '⬇ 解密恢复到本机'}
-                            </button>
-                        </div>
+                        </details>
                         <button onClick={handleLogout} className="w-full py-2 rounded-xl text-[11px] font-bold text-slate-400 hover:text-slate-600 transition-colors">退出登录（云端数据保留）</button>
                     </div>
                 )}

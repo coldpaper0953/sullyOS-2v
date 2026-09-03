@@ -487,6 +487,7 @@ const Settings: React.FC = () => {
       characters, groups, userProfile,
       cloudBackupConfig, updateCloudBackupConfig,
       cloudBackupToWebDAV, cloudRestoreFromWebDAV, listCloudBackups,
+      registerBackHandler,
   } = useOS();
   
   const [localKey, setLocalKey] = useState(apiConfig.apiKey);
@@ -726,6 +727,33 @@ const Settings: React.FC = () => {
   const [showAmsg2Modal, setShowAmsg2Modal] = useState(false);
   const [showVapidModal, setShowVapidModal] = useState(false);
   const [vapidReadyTick, setVapidReadyTick] = useState(0); // 关闭 VAPID 弹窗后刷新顶层徽标
+
+  // 返回键「回退上一级」：有弹层先关最上层弹层，而不是直接退回桌面。
+  // 列表顺序 = 关闭优先级（模型选择 > 各配置弹窗 > 帮助类）。全部关完返回 false，
+  // 交回默认行为（关闭 App 回桌面）。
+  useEffect(() => registerBackHandler(() => {
+      if (showModelModal) { setShowModelModal(false); return true; }
+      if (showVisionModelModal) { setShowVisionModelModal(false); return true; }
+      if (showPresetModal) { setShowPresetModal(false); return true; }
+      if (showApiCallLog) { setShowApiCallLog(false); return true; }
+      if (showRealtimeModal) { setShowRealtimeModal(false); return true; }
+      if (showMcpModal) { setShowMcpModal(false); flushMcpToolConfigSync(); return true; }
+      if (showMcpHelp) { setShowMcpHelp(false); return true; }
+      if (showCloudModal) { setShowCloudModal(false); return true; }
+      if (showGithubModal) { setShowGithubModal(false); return true; }
+      if (showCloudRestoreModal) { setShowCloudRestoreModal(false); return true; }
+      if (showInstantModal) { setShowInstantModal(false); return true; }
+      if (showAmsg2Modal) { setShowAmsg2Modal(false); return true; }
+      if (showVapidModal) { setShowVapidModal(false); return true; }
+      if (showExportModal) { setShowExportModal(false); return true; }
+      if (showResetConfirm) { setShowResetConfirm(false); return true; }
+      if (showApiAdvanced) { setShowApiAdvanced(false); return true; }
+      if (showVoicePrompts) { setShowVoicePrompts(false); return true; }
+      if (showAceStepGuide) { setShowAceStepGuide(false); return true; }
+      if (showProxyConfig) { setShowProxyConfig(false); return true; }
+      if (rtXhsGuideOpen) { setRtXhsGuideOpen(false); return true; }
+      return false; // 无弹层 → 默认（关 App）
+  }), [registerBackHandler, showModelModal, showVisionModelModal, showPresetModal, showApiCallLog, showRealtimeModal, showMcpModal, showMcpHelp, showCloudModal, showGithubModal, showCloudRestoreModal, showInstantModal, showAmsg2Modal, showVapidModal, showExportModal, showResetConfirm, showApiAdvanced, showVoicePrompts, showAceStepGuide, showProxyConfig, rtXhsGuideOpen]);
 
   // 模型选择 Modal 的过滤 + 公共前缀（memo 掉，避免每次 Settings 重渲染都重算）
   const modelPickerView = useMemo(
