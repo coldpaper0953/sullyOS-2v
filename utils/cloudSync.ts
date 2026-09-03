@@ -285,8 +285,7 @@ export async function cloudSyncLogin(config: CloudSyncConfig, email: string, pas
     return session;
 }
 
-/** access token 过期时用 refresh token 换新（自动同步链路里静默用）。 */
-export async function cloudSyncRefresh(config: CloudSyncConfig, session: CloudSyncSession): Promise<CloudSyncSession | null> {
+/** access token 过期时用 refresh token 换新（自动同步链路里静默用）。 */export async function cloudSyncRefresh(config: CloudSyncConfig, session: CloudSyncSession): Promise<CloudSyncSession | null> {
     if (session.expiresAt - Date.now() > 5 * 60_000) return session;
     if (!session.refreshToken) return null;
     try {
@@ -605,7 +604,16 @@ export async function cloudSyncPush(config: CloudSyncConfig, sessionIn: CloudSyn
     try { localStorage.setItem('os_cloud_sync_last_push_v1', String(Date.now())); } catch { /* ignore */ }
     if (opts.secretsJson && opts.secretKey) {
         opts.onProgress?.('正在加密 API 密钥…');
-        const envelope = await encryptSecrets(opts.secretKey, opts.secretsJson);
+        // 与云端已有的那份**逐字段合并**再上传，而不是整包替换。
+        //
+        // 为什么必须合并：secretsJson 是 exportSystem 从 React state 拿的，而自动上传可能在
+        // 某些字段还没加载进 state 时就触发（pagehide 早于 setApiPresets/setAvailableModels 之类）。
+        // 那种包会**静默少几项**（实测云端只剩 5/9 项：apiPresets、availableModels、instantPushConfig、
+        // studyApiConfig 全丢），整包替换等于把上一次同步好的字段抹掉——用户侧表现就是
+        // 「新加的预设/模型列表怎么都同步不过去」。合并后：这次带来的字段覆盖旧值（满足
+        // 「按最新时间覆盖」），这次没带的字段保留云端原值，不再倒退。
+        const merged = await mergeWithCloudSecrets(config, session, opts.secretKey, opts.secretsJson);
+        const envelope = await encryptSecrets(opts.secretKey, merged);
         const secRes = await fetch(`${baseUrl(config)}/rest/v1/sully_api_secrets`, {
             method: 'POST',
             headers: { ...authHeaders(config, session), Prefer: 'resolution=merge-duplicates' },
@@ -620,6 +628,45 @@ export async function cloudSyncPush(config: CloudSyncConfig, sessionIn: CloudSyn
         body: JSON.stringify({ beat_at: Date.now() }),
     }).catch(() => {});
     return { rawBytes, gzipBytes };
+}
+
+/**
+ * 读云端已有的密钥包，与本次要推的逐字段合并后返回 JSON 字符串。
+ *
+ * 规则：本次带来的字段覆盖云端（「按最新时间覆盖」），本次没带的字段保留云端原值。
+ * 任何一步失败都直接返回本次这份——合并只是防倒退的加固，不能让它把上传拦下来。
+ */
+async function mergeWithCloudSecrets(
+    config: CloudSyncConfig,
+    session: CloudSyncSession,
+    key: CryptoKey,
+    incomingJson: string,
+): Promise<string> {
+    let incoming: Record<string, unknown>;
+    try {
+        incoming = JSON.parse(incomingJson) as Record<string, unknown>;
+    } catch {
+        return incomingJson;
+    }
+    try {
+        const res = await fetch(
+            `${baseUrl(config)}/rest/v1/sully_api_secrets?select=envelope&user_id=eq.${encodeURIComponent(session.userId)}&limit=1`,
+            { headers: authHeaders(config, session) },
+        );
+        if (!res.ok) return incomingJson;
+        const rows = await res.json() as Array<{ envelope: unknown }>;
+        if (!rows?.length) return incomingJson;
+        const env = typeof rows[0].envelope === 'string' ? JSON.parse(rows[0].envelope) : rows[0].envelope;
+        const existing = JSON.parse(await decryptSecrets(env, key)) as Record<string, unknown>;
+        const merged: Record<string, unknown> = { ...existing };
+        for (const [k, v] of Object.entries(incoming)) {
+            if (v !== undefined) merged[k] = v;
+        }
+        return JSON.stringify(merged);
+    } catch {
+        // 云端那份解不开（换过密码 / 旧信封格式）时不要卡住上传，本次这份照推
+        return incomingJson;
+    }
 }
 
 export interface CloudSnapshotMeta {
