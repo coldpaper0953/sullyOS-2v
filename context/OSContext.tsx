@@ -1171,6 +1171,17 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               console.warn('[云同步] 本机数据尚未就绪/为空，跳过这次自动上传（避免用空档覆盖云端）');
               return;
           }
+          // 本机 API key 是空的就不要把这份"没有密钥"的配置推上去顶掉云端那份好的——
+          // 这正是之前把测试机的空配置推上去、其他设备一拉就没 key 的成因。
+          try {
+              const localKey = (JSON.parse(localStorage.getItem('os_api_config') || '{}').apiKey || '').trim();
+              if (!localKey) {
+                  console.warn('[云同步] 本机没有 API key，本次只推数据不覆盖云端密钥');
+                  (window as any).__cloudSkipSecrets = true;
+              } else {
+                  (window as any).__cloudSkipSecrets = false;
+              }
+          } catch { /* ignore */ }
           cloudAutoSyncRef.current = true;
           void (async () => {
               try {
@@ -1189,7 +1200,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   const { publicZip, secretsJson } = await splitBackupSecrets(zipBlob);
                   await cloudSyncPush(cfg, session, {
                       zipBlob: publicZip,
-                      secretsJson,
+                      secretsJson: (window as any).__cloudSkipSecrets ? undefined : secretsJson,
                       secretKey,
                       deviceLabel: 'auto-sync',
                   });
@@ -1275,7 +1286,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               if (!cfg.autoSync || !session?.accessToken) return;
               const cloudAt = await cloudSyncPeekSecrets(cfg, session);
               const seenAt = Number(localStorage.getItem('os_cloud_secrets_seen_v1') || '0');
-              if (!cloudAt || cloudAt <= seenAt) return;
+              // 时间戳没变通常就不用动，但有一种情况必须无条件补一次：本机 API key 是空的
+              // 而云端有——这正是「换设备后 API 同步不下来」的表现（本地设置被 lsMirror 的
+              // 旧快照回填、或上一次同步只到了一半），此时不能因为「时间戳一样」就跳过。
+              const localKeyEmpty = (() => {
+                  try { return !(JSON.parse(localStorage.getItem('os_api_config') || '{}').apiKey || '').trim(); } catch { return true; }
+              })();
+              if (!cloudAt) return;
+              if (cloudAt <= seenAt && !localKeyEmpty) return;
               const { secretsJson } = await cloudSyncPullSecrets(cfg, session);
               if (!secretsJson) return;
               const secrets = JSON.parse(secretsJson) as Record<string, any>;
@@ -1292,7 +1310,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   if (secrets[field] !== undefined) localStorage.setItem(lsKey, JSON.stringify(secrets[field]));
               }
               localStorage.setItem('os_cloud_secrets_seen_v1', String(cloudAt));
-              cloudPullToastRef.current('已同步云端的 API 配置', 'success');
+              // 立刻刷新 localStorage 的 IndexedDB 镜像：否则镜像里那份旧 API 配置
+              // 会在以后某次启动被当成「本机丢了设置」回填回来，把云端这份顶掉。
+              void import('../utils/lsMirror').then(m => m.snapshotLocalStorageMirror()).catch(() => {});
+              if (secrets.apiConfig?.apiKey) cloudPullToastRef.current('已同步云端的 API 配置', 'success');
           } catch (e) {
               console.warn('[云同步] API 配置同步失败（不影响本地）：', e);
           }
