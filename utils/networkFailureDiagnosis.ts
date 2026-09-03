@@ -313,7 +313,30 @@ export const buildFetchFailureDetail = (
         lines.push(`初判: ${VERDICTS[kind].verdict}`);
         lines.push(`可能原因: ${VERDICTS[kind].causes}`);
     }
+    const staticHostHint = readStaticHostBlockHint(target, pageOrigin, kind);
+    if (staticHostHint) lines.push(staticHostHint);
     return lines.join('\n');
+};
+
+/**
+ * 已知场景直说，别让用户在通用可能性里猜：部分服务商（实测 tokenrouter）的防火墙
+ * 会拒绝「来源是静态托管域名」的浏览器请求——返回不带 CORS 头的 403，浏览器只看到
+ * Failed to fetch。同一个 key 从 localhost 或服务端请求却是 200，所以这不是配置错。
+ */
+const STATIC_HOSTING_ORIGIN = /\.(github\.io|netlify\.app|vercel\.app|pages\.dev|workers\.dev)$/i;
+const KNOWN_ORIGIN_PICKY_HOSTS = /(^|\.)tokenrouter\.com$/i;
+
+const readStaticHostBlockHint = (
+    target: { ok: boolean; host: string; origin: string },
+    pageOrigin: string | undefined,
+    kind: FetchFailureKind,
+): string | null => {
+    if (kind !== 'blocked' || !target.ok || !pageOrigin) return null;
+    let pageHost = '';
+    try { pageHost = new URL(pageOrigin).hostname; } catch { return null; }
+    if (!STATIC_HOSTING_ORIGIN.test(pageHost)) return null;
+    if (!KNOWN_ORIGIN_PICKY_HOSTS.test(target.host)) return null;
+    return `已知情况: ${target.host} 会拦掉来源为 ${pageHost} 这类静态托管域名的浏览器请求（返回没有 CORS 头的拒绝页，浏览器只能报 Failed to fetch）。同一个 key 在本地运行时是正常的。解决办法：把 API 地址改成一个中继地址（自己的 Supabase Edge Function / Cloudflare Worker 都行），或者把本项目跑在本机再用直连地址。`;
 };
 
 // ─── no-cors 连通性复检 ───

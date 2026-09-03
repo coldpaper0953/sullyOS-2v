@@ -11,7 +11,12 @@ export const normalizeApiBaseUrl = (value: unknown): string =>
   // tokenrouter 官网门户在 www. 子域而 API 只开在 api.——从官网地址栏复制时容易
   // 把 www 填进来，表现为「Failed to fetch」（门户 HTML 无 CORS 头）。规范化时统一纠正；
   // 只精确匹配该域名，其他服务商的 www 不动。
-  cleanEdgeCharacters(value).replace(/\/+$/, '').replace(/^(https?:\/\/)www\.(tokenrouter\.com)/i, '$1api.$2');
+  // 另外补一个高频手误：结尾的 `/1` 一定是 `/v1` 少打了 v（实测有人因此请求
+  // https://api.xxx.com/1/models 而百思不解），只在末尾整段是 1 时纠正。
+  cleanEdgeCharacters(value)
+    .replace(/\/+$/, '')
+    .replace(/^(https?:\/\/)www\.(tokenrouter\.com)/i, '$1api.$2')
+    .replace(/\/1$/, '/v1');
 
 export const fixApiHost = (value: unknown): string => normalizeApiBaseUrl(value);
 
