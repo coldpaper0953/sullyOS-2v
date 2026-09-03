@@ -3303,7 +3303,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         addToast('主题没能保存到本地（存储空间可能已满），重启后可能会还原', 'error');
     }
   };
-  const updateApiConfig = (updates: Partial<APIConfig>) => { const newConfig = normalizeApiConfig({ ...apiConfig, ...updates }); setApiConfig(newConfig); localStorage.setItem('os_api_config', JSON.stringify(newConfig)); };
+  const updateApiConfig = (updates: Partial<APIConfig>) => { const newConfig = normalizeApiConfig({ ...apiConfig, ...updates }); setApiConfig(newConfig); localStorage.setItem('os_api_config', JSON.stringify(newConfig)); markSettingDirty('os_api_config'); };
   const updateRealtimeConfig = (updates: Partial<RealtimeConfig>) => { const newConfig = { ...realtimeConfig, ...updates }; setRealtimeConfig(newConfig); localStorage.setItem('os_realtime_config', JSON.stringify(newConfig)); };
 
   // Cloud Backup functions
@@ -3430,6 +3430,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       const safeModels = normalizeModelIds(models);
       setAvailableModels(safeModels);
       localStorage.setItem('os_available_models', JSON.stringify(safeModels));
+      markSettingDirty('os_available_models');
+  };
+  /**
+   * 通知逐键云同步「这个键改了」。1.2 秒防抖后批量上传（见 utils/syncedSettings）。
+   * 每个会写这些键的地方都要叫一次——漏掉哪个，那个键就只在本机变、别的设备永远看不到
+   * （模型改了同步不过去就是因为漏了 os_api_config 这一处）。
+   */
+  const markSettingDirty = (key: string) => {
+      void import('../utils/syncedSettings').then(m => m.markSyncedSettingDirty(key)).catch(() => {});
   };
   /**
    * 预设落库 + 通知逐键云同步。
@@ -3438,7 +3447,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
    */
   const persistPresets = (next: ApiPreset[]) => {
       localStorage.setItem('os_api_presets', JSON.stringify(next));
-      void import('../utils/syncedSettings').then(m => m.markSyncedSettingDirty('os_api_presets')).catch(() => {});
+      markSettingDirty('os_api_presets');
   };
   const addApiPreset = (name: string, config: APIConfig) => { setApiPresets(prev => { const next = [...prev, normalizeApiPreset({ id: Date.now().toString(), name, config })]; persistPresets(next); return next; }); };
   const updateApiPreset = (id: string, name: string, config: APIConfig) => { setApiPresets(prev => { const next = prev.map(p => p.id === id ? normalizeApiPreset({ ...p, name, config }) : p); persistPresets(next); return next; }); };
