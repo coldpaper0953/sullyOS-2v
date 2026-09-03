@@ -22,7 +22,7 @@
  * 验证：打开 https://xxx.workers.dev/v1/models，能看到模型列表 JSON 即成功。
  */
 
-const TARGET = (env.TARGET_HOST || 'https://api.tokenrouter.com').replace(/\/+$/, '');
+const DEFAULT_TARGET = 'https://api.tokenrouter.com';
 
 const CORS = {
     'Access-Control-Allow-Origin': '*',
@@ -40,7 +40,9 @@ export default {
             return new Response(null, { status: 204, headers: CORS });
         }
         const url = new URL(request.url);
-        const upstream = TARGET + url.pathname + url.search;
+        // env 只在 fetch 的入参里存在，不能在模块顶层读——那样 Worker 一启动就 ReferenceError。
+        const target = (env?.TARGET_HOST || DEFAULT_TARGET).replace(/\/+$/, '');
+        const upstream = target + url.pathname + url.search;
         const headers = {};
         for (const [k, v] of request.headers) {
             if (!STRIP.has(k.toLowerCase())) headers[k] = v;
