@@ -769,8 +769,30 @@ export function snapshotMirroredSettings(): Record<string, string> {
  *   - 返回改写后的【明文数据包 zip】与【敏感字段 JSON 字符串】
  * 单文件 data.json 的 v1 老格式同理处理（整个对象就是根）。
  */
-export async function splitBackupSecrets(zipBlob: Blob): Promise<{ publicZip: Blob; secretsJson: string }> {
-    const JSZip = (await import('jszip')).default;
+/**
+ * 这份密钥包里到底有没有「值得上传」的凭据？
+ *
+ * 之前只看 apiConfig.apiKey，于是把 key 只填在**预设**里的用户坑了：主配置为空 →
+ * 判定「本机没密钥」→ 整包跳过 → 新加的预设永远同步不上去。这里把每一类都数一遍。
+ */
+export function secretsHaveCredential(secretsJson: string | undefined | null): boolean {
+    if (!secretsJson) return false;
+    let s: Record<string, any>;
+    try { s = JSON.parse(secretsJson); } catch { return false; }
+    const nonEmpty = (v: unknown) => typeof v === 'string' && v.trim().length > 0;
+    if (nonEmpty(s.apiConfig?.apiKey) || nonEmpty(s.apiConfig?.visionApi?.apiKey)) return true;
+    if (Array.isArray(s.apiPresets) && s.apiPresets.some((p: any) => nonEmpty(p?.config?.apiKey))) return true;
+    if (nonEmpty(s.checkPhoneApi?.apiKey)) return true;
+    if (nonEmpty(s.studyApiConfig?.apiKey)) return true;
+    if (nonEmpty(s.instantPushConfig?.workerUrl) || nonEmpty(s.instantPushConfig?.sharedSecret)) return true;
+    if (nonEmpty(s.pushVapid?.vapidPrivateKey)) return true;
+    if (nonEmpty(s.amsg2GlobalConfig?.workerUrl)) return true;
+    if (nonEmpty(s.cloudBackupConfig?.githubToken) || nonEmpty(s.cloudBackupConfig?.password)) return true;
+    if (nonEmpty(s.backendChatConfig?.token)) return true;
+    return false;
+}
+
+export async function splitBackupSecrets(zipBlob: Blob): Promise<{ publicZip: Blob; secretsJson: string }> {    const JSZip = (await import('jszip')).default;
     const zip = await JSZip.loadAsync(zipBlob);
     const metaFile = zip.file('metadata.json') || zip.file('data.json');
     if (!metaFile) throw new Error('备份包里找不到 metadata.json/data.json');
@@ -787,8 +809,7 @@ export async function splitBackupSecrets(zipBlob: Blob): Promise<{ publicZip: Bl
     return { publicZip, secretsJson: JSON.stringify(secrets) };
 }
 
-/** 恢复端合并：把解密出的敏感字段塞回明文数据包的 metadata，产出可直接 importSystem 的 zip。 */
-export async function mergeBackupSecrets(publicZipBlob: Blob, secretsJson: string): Promise<Blob> {
+/** 恢复端合并：把解密出的敏感字段塞回明文数据包的 metadata，产出可直接 importSystem 的 zip。 */export async function mergeBackupSecrets(publicZipBlob: Blob, secretsJson: string): Promise<Blob> {
     const JSZip = (await import('jszip')).default;
     const zip = await JSZip.loadAsync(publicZipBlob);
     const metaFile = zip.file('metadata.json') || zip.file('data.json');

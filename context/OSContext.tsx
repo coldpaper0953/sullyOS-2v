@@ -1171,21 +1171,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               console.warn('[云同步] 本机数据尚未就绪/为空，跳过这次自动上传（避免用空档覆盖云端）');
               return;
           }
-          // 本机 API key 是空的就不要把这份"没有密钥"的配置推上去顶掉云端那份好的——
-          // 这正是之前把测试机的空配置推上去、其他设备一拉就没 key 的成因。
-          try {
-              const localKey = (JSON.parse(localStorage.getItem('os_api_config') || '{}').apiKey || '').trim();
-              if (!localKey) {
-                  console.warn('[云同步] 本机没有 API key，本次只推数据不覆盖云端密钥');
-                  (window as any).__cloudSkipSecrets = true;
-              } else {
-                  (window as any).__cloudSkipSecrets = false;
-              }
-          } catch { /* ignore */ }
           cloudAutoSyncRef.current = true;
           void (async () => {
               try {
-                  const { loadCloudSyncConfig, loadCloudSyncSession, cloudSyncPush, splitBackupSecrets, resolveSecretKey, cloudPushOnHold } = await import('../utils/cloudSync');
+                  const { loadCloudSyncConfig, loadCloudSyncSession, cloudSyncPush, splitBackupSecrets, resolveSecretKey, cloudPushOnHold, secretsHaveCredential } = await import('../utils/cloudSync');
                   if (cloudPushOnHold()) {
                       console.warn('[云同步] 刚从云端导入完，静默期内不回推（防两台设备互相触发重启）');
                       return;
@@ -1198,9 +1187,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   if (!exportFn) return;
                   const zipBlob = await exportFn();
                   const { publicZip, secretsJson } = await splitBackupSecrets(zipBlob);
+                  // 本机这份密钥包一个凭据都没有（主配置、预设、各类 token 全空）→ 只推数据，
+                  // 别把云端那份好的顶成空的。哪怕只是「key 只填在预设里」也算有凭据。
+                  const hasCredential = secretsHaveCredential(secretsJson);
                   await cloudSyncPush(cfg, session, {
                       zipBlob: publicZip,
-                      secretsJson: (window as any).__cloudSkipSecrets ? undefined : secretsJson,
+                      secretsJson: hasCredential ? secretsJson : undefined,
                       secretKey,
                       deviceLabel: 'auto-sync',
                   });
@@ -1223,6 +1215,47 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   // exportSystem 定义在后文（组件体内）——挂进 ref 供上面的自动同步闭包取最新版
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { cloudAutoSyncExportRef.current = () => exportSystem('text_only'); });
+
+  // --- 云端账号同步 · 定时自动上传 ---
+  // 只在「页面隐藏」时推的话，一台设备一直开着就永远推不上去，另一台刷新也看不到新东西。
+  // 这里每 3 分钟看一眼：本轮会话里数据确实变过（lastMsgTimestamp / 角色数变化）才推，
+  // 没变就一个字节都不传。
+  const cloudTimerPushRef = useRef({ lastPushedSignature: '', running: false });
+  useEffect(() => {
+      if (!isDataLoaded) return;
+      const tick = async () => {
+          const guard = cloudPushGuardRef.current;
+          if (!guard.dataLoaded || guard.charCount === 0) return;
+          if (cloudTimerPushRef.current.running) return;
+          const signature = `${lastMsgTimestamp}|${characters.length}|${characters.map(c => c.id).join(',').length}`;
+          if (signature === cloudTimerPushRef.current.lastPushedSignature) return; // 没变化
+          cloudTimerPushRef.current.running = true;
+          try {
+              const { loadCloudSyncConfig, loadCloudSyncSession, cloudSyncPush, splitBackupSecrets, resolveSecretKey, cloudPushOnHold, secretsHaveCredential } = await import('../utils/cloudSync');
+              const cfg = loadCloudSyncConfig();
+              const session = loadCloudSyncSession();
+              if (!cfg.autoSync || !session?.accessToken || cloudPushOnHold()) return;
+              const exportFn = cloudAutoSyncExportRef.current;
+              if (!exportFn) return;
+              const secretKey = await resolveSecretKey(session.userId);
+              const { publicZip, secretsJson } = await splitBackupSecrets(await exportFn());
+              await cloudSyncPush(cfg, session, {
+                  zipBlob: publicZip,
+                  secretsJson: secretsHaveCredential(secretsJson) ? secretsJson : undefined,
+                  secretKey,
+                  deviceLabel: 'auto-sync',
+              });
+              cloudTimerPushRef.current.lastPushedSignature = signature;
+          } catch (e) {
+              console.warn('[云同步] 定时上传失败（不影响本地数据）：', e);
+          } finally {
+              cloudTimerPushRef.current.running = false;
+          }
+      };
+      const timer = window.setInterval(() => void tick(), 3 * 60_000);
+      return () => window.clearInterval(timer);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDataLoaded, lastMsgTimestamp, characters.length]);
 
   // --- 云端账号同步 · 开机自动拉新 ---
   // 用户要的是「点开就是上次的状态，不用导入」：登录状态下启动时对比云端 pushed_at
@@ -1286,14 +1319,19 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               if (!cfg.autoSync || !session?.accessToken) return;
               const cloudAt = await cloudSyncPeekSecrets(cfg, session);
               const seenAt = Number(localStorage.getItem('os_cloud_secrets_seen_v1') || '0');
-              // 时间戳没变通常就不用动，但有一种情况必须无条件补一次：本机 API key 是空的
+              // 时间戳没变通常就不用动，但有一种情况必须无条件补一次：本机一个凭据都没有
               // 而云端有——这正是「换设备后 API 同步不下来」的表现（本地设置被 lsMirror 的
-              // 旧快照回填、或上一次同步只到了一半），此时不能因为「时间戳一样」就跳过。
-              const localKeyEmpty = (() => {
-                  try { return !(JSON.parse(localStorage.getItem('os_api_config') || '{}').apiKey || '').trim(); } catch { return true; }
+              // 旧快照回填、上次同步只走了一半）。「key 只填在预设里」也算有凭据。
+              const localHasCredential = (() => {
+                  try {
+                      const api = JSON.parse(localStorage.getItem('os_api_config') || '{}');
+                      if ((api.apiKey || '').trim()) return true;
+                      const presets = JSON.parse(localStorage.getItem('os_api_presets') || '[]');
+                      return Array.isArray(presets) && presets.some((p: any) => (p?.config?.apiKey || '').trim());
+                  } catch { return false; }
               })();
               if (!cloudAt) return;
-              if (cloudAt <= seenAt && !localKeyEmpty) return;
+              if (cloudAt <= seenAt && localHasCredential) return;
               const { secretsJson } = await cloudSyncPullSecrets(cfg, session);
               if (!secretsJson) return;
               const secrets = JSON.parse(secretsJson) as Record<string, any>;

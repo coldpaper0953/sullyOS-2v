@@ -130,10 +130,18 @@ function classifyError(error: unknown): 'retry' | 'switch' | 'fatal' {
 /**
  * 带故障转移的执行器。
  *
+ * 顺序是确定的：当前配置 → 其余预设（按预设列表顺序，重复的跳过），每个候选最多
+ * 重试 retriesPerApi 次，且**全局有硬上限**：总尝试次数 ≤ MAX_TOTAL_ATTEMPTS、
+ * 总耗时 ≤ TOTAL_BUDGET_MS。上限存在的原因：预设一多（5 个 × 2 次重试 = 15 次尝试，
+ * 每次几十秒）就会连着转好几分钟，用户看着就是"卡死在一直请求失败"。
+ *
  * @param attempt 对单个候选 API 执行一次完整请求（含调用方自己的兼容重试逻辑），
  *                抛错即视为该候选本轮失败。
  * @param onSwitch 实际发生切换时回调（用于 toast 提示）。
  */
+const MAX_TOTAL_ATTEMPTS = 6;
+const TOTAL_BUDGET_MS = 120_000;
+
 export async function runWithApiFailover<T>(input: {
     primary: { baseUrl: string; apiKey: string; model: string };
     attempt: (candidate: FailoverCandidate) => Promise<T>;
@@ -149,10 +157,16 @@ export async function runWithApiFailover<T>(input: {
     const { candidates, stickyHit } = buildRotationCandidates(input.primary);
 
     let lastError: unknown;
+    let totalAttempts = 0;
+    const startedAt = Date.now();
+    const outOfBudget = () => totalAttempts >= MAX_TOTAL_ATTEMPTS || (Date.now() - startedAt) > TOTAL_BUDGET_MS;
     for (let ci = 0; ci < candidates.length; ci++) {
+        if (outOfBudget()) break;
         const candidate = candidates[ci];
         const attemptLimit = config.enabled ? config.retriesPerApi : 0;
         for (let attemptIdx = 0; attemptIdx <= attemptLimit; attemptIdx++) {
+            if (outOfBudget()) break;
+            totalAttempts++;
             try {
                 const result = await input.attempt(candidate);
                 if (ci > 0 || stickyHit) stickyCandidate = candidate;
@@ -160,15 +174,14 @@ export async function runWithApiFailover<T>(input: {
             } catch (error) {
                 lastError = error;
                 const kind = classifyError(error);
-                const message = error instanceof Error ? error.message : String(error ?? '');
                 if (kind === 'fatal') throw error;
                 if (kind === 'switch' || attemptIdx >= attemptLimit) break; // 换下一个候选
                 // 指数退避：1s, 2s, 4s...（429 常带 Retry-After，这里简化处理）
                 await new Promise(resolve => setTimeout(resolve, Math.pow(2, attemptIdx) * 1000));
             }
         }
-        // 本候选耗尽 → 切换下一个（有下一个才提示，最后一个失败留给原错误）
-        if (ci + 1 < candidates.length) {
+        // 本候选耗尽 → 切换下一个（有下一个、且预算还够才提示）
+        if (ci + 1 < candidates.length && !outOfBudget()) {
             const next = candidates[ci + 1];
             const reason = lastError instanceof Error ? lastError.message.slice(0, 120) : '请求失败';
             if (config.enabled) {

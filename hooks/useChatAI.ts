@@ -758,6 +758,8 @@ export const useChatAI = ({
         const genAbort = new AbortController();
         genAbortRef.current = genAbort;
         setChatAbortSignal(genAbort.signal);
+        // 流式累计正文：用户按「停止」时把已经生成的半段留下来（声明在 try 外，catch 要读）
+        let streamedRawText = '';
         setStreamingBubbles([]);
         setStreamingThinking('');
         setRecallStatus('');
@@ -1460,6 +1462,7 @@ export const useChatAI = ({
             };
             const streamHooks = (streamPreviewEligible || streamThinkingEligible) ? {
                 onDelta: (_delta: string, fullText: string) => {
+                    streamedRawText = fullText;
                     if (streamPreviewEligible) {
                         const bubbles = computeStreamPreviewBubbles(fullText);
                         latestStreamPreviewBubbles = bubbles;
@@ -2181,9 +2184,22 @@ export const useChatAI = ({
             // 注意: 这个 catch 兜的是「拿到 API 响应之后」的整条后处理管线 (applyAssistantPostProcessing,
             // 13 步)。这里抛错多半不是网络问题, 而是解析/正则/落库异常。别再叫"连接中断"误导排查。
             const errMsg = e?.message || String(e);
-            // 用户按了「停止」：这是他自己的意图，不写失败系统消息、不弹错，安静收尾即可。
+            // 用户按了「停止」：这是他自己的意图，不写失败系统消息、不弹错。
+            // 已经流出来的半段正文照常落库（清洗后按气泡切分），不然点一下停止内容全没了。
             if (e?.name === 'AbortError' || genAbort.signal.aborted) {
                 console.log('⏹ [Chat] 本轮生成已被用户终止');
+                try {
+                    const partial = ChatParser.sanitize(streamedRawText || '', { keepCitations: true }).trim();
+                    if (partial && ChatParser.hasDisplayContent(partial)) {
+                        for (const chunk of ChatParser.chunkText(partial)) {
+                            const clean = ChatParser.sanitize(chunk, { keepCitations: true }).trim();
+                            if (!clean || !ChatParser.hasDisplayContent(clean)) continue;
+                            await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: clean });
+                        }
+                    }
+                } catch (saveErr) {
+                    console.warn('[Chat] 终止时保存半段回复失败（不影响其它数据）', saveErr);
+                }
             } else if (luckinChatRef?.current?.active && /\b400\b|tool|function[_\s-]?call/i.test(errMsg)) {
                 // 瑞一杯模式下报错: 大概率是聊天模型/中转不支持 function calling(tools) → 带 tools 一发就 400。
                 // 在 APK 里看不到控制台, 这里把完整原因 + 解法存成可读消息, 方便排查。
