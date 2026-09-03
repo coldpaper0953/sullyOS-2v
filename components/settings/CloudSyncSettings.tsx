@@ -178,63 +178,54 @@ const CloudSyncSettings: React.FC = () => {
 
             {open && <div className="space-y-3">
                 <p className="text-xs text-slate-500 leading-relaxed">
-                    用你自己的 Supabase 账号存档：注册登录即对应你的全部数据（角色、聊天、设置、API 配置），换设备登录后一键拉回无缝继续。数据行按账号行级隔离，100% 在你自己手里。与「云端备份」「自主后端」并存互不影响。
+                    注册一个账号（邮箱+密码），本机全部数据（角色、聊天、设置、API 配置）加密后存到云端；换设备登录同一账号即可一键拉回。数据行按账号行级隔离，100% 只属于你。
                 </p>
 
-                {/* 快捷部署链接 */}
-                <div className="rounded-2xl bg-violet-50/60 border border-violet-100 p-3 space-y-2">
-                    <div className="text-[10px] font-bold text-violet-500 uppercase tracking-widest">快速开始（只需一次）</div>
-                    <ol className="text-[11px] text-slate-600 leading-relaxed list-decimal list-inside space-y-1">
-                        <li>注册 <a href="https://supabase.com" target="_blank" rel="noreferrer" className="text-violet-500 font-bold underline underline-offset-2">supabase.com</a>（免费套餐即可）并新建项目</li>
-                        <li>项目设置 → API 里复制 <b>项目地址</b>和 <b>anon key</b> 填到下面</li>
-                        <li>点「查看初始化 SQL」复制，到 Supabase 的 <b>SQL Editor</b> 粘贴运行（建表 + 定时心跳，一键完成）</li>
-                    </ol>
-                    <button onClick={() => { setShowSql(v => !v); if (!showSql) trackEvent('查看云同步初始化SQL'); }} className="w-full py-2 rounded-xl text-[11px] font-bold text-violet-600 bg-white border border-violet-200 hover:bg-violet-50 transition-colors">
-                        {showSql ? '收起初始化 SQL' : '查看初始化 SQL'}
-                    </button>
-                    <p className="text-center text-[10px] text-slate-400">完整部署指南见仓库 <span className="font-mono">docs/cloud-sync-setup.md</span></p>
-                    {showSql && (
-                        <div className="space-y-2">
-                            <pre className="max-h-48 overflow-auto rounded-xl bg-slate-900 text-slate-100 text-[9px] leading-relaxed p-3 whitespace-pre-wrap">{CLOUD_SYNC_INIT_SQL}</pre>
-                            <button
-                                onClick={() => { navigator.clipboard.writeText(CLOUD_SYNC_INIT_SQL).then(() => addToast('SQL 已复制，去 Supabase SQL Editor 粘贴运行', 'success')).catch(() => addToast('复制失败，请手动选择复制', 'error')); trackEvent('复制云同步初始化SQL'); }}
-                                className="w-full py-2 rounded-xl text-[11px] font-bold text-white bg-violet-500 hover:bg-violet-600 shadow-sm shadow-violet-200 active:scale-95 transition-all"
-                            >
-                                复制 SQL
+                {/* 连接配置：内置官方服务器，默认无需填写；收进折叠里供自部署用户替换 */}
+                <details className="rounded-2xl bg-slate-50/70 border border-slate-100">
+                    <summary className="px-3 py-2 text-[11px] font-bold text-slate-400 cursor-pointer select-none">自部署服务器（可选，默认用内置）</summary>
+                    <div className="p-3 pt-0 space-y-2">
+                        <label className="block">
+                            <span className="mb-1.5 block text-[10px] font-bold text-slate-500">Supabase 项目地址</span>
+                            <input value={config.supabaseUrl} onChange={e => persistConfig({ ...config, supabaseUrl: e.target.value })} placeholder="https://xxxx.supabase.co" spellCheck={false} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-violet-400 focus:ring-2 focus:ring-violet-100" />
+                        </label>
+                        <label className="block">
+                            <span className="mb-1.5 block text-[10px] font-bold text-slate-500">anon key</span>
+                            <input value={config.supabaseAnonKey} onChange={e => persistConfig({ ...config, supabaseAnonKey: e.target.value })} placeholder="项目设置 → API → anon public" type="password" spellCheck={false} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-violet-400 focus:ring-2 focus:ring-violet-100" />
+                        </label>
+                        <div className="flex gap-2">
+                            <button onClick={runProbe} disabled={busy === 'probe' || !connected} className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all ${connected ? 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50' : 'bg-slate-100 text-slate-300'}`}>
+                                {busy === 'probe' ? '探测中…' : '测试连接'}
                             </button>
+                            <label className="flex items-center gap-2 px-3 rounded-xl border border-slate-200 bg-white text-xs text-slate-600 cursor-pointer">
+                                <input type="checkbox" checked={config.autoSync} onChange={e => persistConfig({ ...config, autoSync: e.target.checked })} className="accent-violet-500" />
+                                自动上传
+                            </label>
                         </div>
-                    )}
-                </div>
-
-                {/* 连接配置 */}
-                <label className="block">
-                    <span className="mb-1.5 block text-[10px] font-bold text-slate-500">Supabase 项目地址</span>
-                    <input value={config.supabaseUrl} onChange={e => persistConfig({ ...config, supabaseUrl: e.target.value })} placeholder="https://xxxx.supabase.co" spellCheck={false} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-violet-400 focus:ring-2 focus:ring-violet-100" />
-                </label>
-                <label className="block">
-                    <span className="mb-1.5 block text-[10px] font-bold text-slate-500">anon key</span>
-                    <input value={config.supabaseAnonKey} onChange={e => persistConfig({ ...config, supabaseAnonKey: e.target.value })} placeholder="项目设置 → API → anon public" type="password" spellCheck={false} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-violet-400 focus:ring-2 focus:ring-violet-100" />
-                </label>
-                <div className="flex gap-2">
-                    <button onClick={runProbe} disabled={busy === 'probe' || !connected} className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all ${connected ? 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50' : 'bg-slate-100 text-slate-300'}`}>
-                        {busy === 'probe' ? '探测中…' : '测试连接'}
-                    </button>
-                    <label className="flex items-center gap-2 px-3 rounded-xl border border-slate-200 bg-white text-xs text-slate-600 cursor-pointer">
-                        <input type="checkbox" checked={config.autoSync} onChange={e => persistConfig({ ...config, autoSync: e.target.checked })} className="accent-violet-500" />
-                        自动上传
-                    </label>
-                </div>
-                {probe && (
-                    <p className={`text-[11px] leading-relaxed px-3 py-2 rounded-xl ${probe.ok ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>{probe.ok ? '✅ ' : '⚠️ '}{probe.message}</p>
-                )}
-
-                {connected && (
-                    <div className="h-px bg-slate-100" />
-                )}
+                        {probe && (
+                            <p className={`text-[11px] leading-relaxed px-3 py-2 rounded-xl ${probe.ok ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>{probe.ok ? '✅ ' : '⚠️ '}{probe.message}</p>
+                        )}
+                        <p className="text-[10px] text-slate-400 leading-relaxed">自部署：注册 <a href="https://supabase.com" target="_blank" rel="noreferrer" className="text-violet-500 underline underline-offset-2">supabase.com</a> 新建项目，点「查看初始化 SQL」在 SQL Editor 运行一次。</p>
+                        <button onClick={() => { setShowSql(v => !v); if (!showSql) trackEvent('查看云同步初始化SQL'); }} className="w-full py-2 rounded-xl text-[11px] font-bold text-violet-600 bg-white border border-violet-200 hover:bg-violet-50 transition-colors">
+                            {showSql ? '收起初始化 SQL' : '查看初始化 SQL'}
+                        </button>
+                        {showSql && (
+                            <div className="space-y-2">
+                                <pre className="max-h-48 overflow-auto rounded-xl bg-slate-900 text-slate-100 text-[9px] leading-relaxed p-3 whitespace-pre-wrap">{CLOUD_SYNC_INIT_SQL}</pre>
+                                <button
+                                    onClick={() => { navigator.clipboard.writeText(CLOUD_SYNC_INIT_SQL).then(() => addToast('SQL 已复制，去 Supabase SQL Editor 粘贴运行', 'success')).catch(() => addToast('复制失败，请手动选择复制', 'error')); trackEvent('复制云同步初始化SQL'); }}
+                                    className="w-full py-2 rounded-xl text-[11px] font-bold text-white bg-violet-500 hover:bg-violet-600 shadow-sm shadow-violet-200 active:scale-95 transition-all"
+                                >
+                                    复制 SQL
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </details>
 
                 {/* 账号登录/注册 */}
                 {connected && !session && (
-                    <div className="space-y-2.5 rounded-2xl bg-slate-50/70 border border-slate-100 p-3">
+                    <div className="space-y-2.5 rounded-2xl bg-violet-50/50 border border-violet-100 p-3">
                         <div className="flex gap-2">
                             <button onClick={() => setMode('login')} className={`flex-1 py-1.5 rounded-full text-[11px] font-bold border transition-colors ${mode === 'login' ? 'bg-violet-500 text-white border-violet-500' : 'bg-white text-slate-500 border-slate-200'}`}>登录</button>
                             <button onClick={() => setMode('signup')} className={`flex-1 py-1.5 rounded-full text-[11px] font-bold border transition-colors ${mode === 'signup' ? 'bg-violet-500 text-white border-violet-500' : 'bg-white text-slate-500 border-slate-200'}`}>注册新账号</button>

@@ -104,18 +104,32 @@ export interface CloudSyncSession {
     expiresAt: number;       // epoch ms
 }
 
+/**
+ * 官方内置服务器：用户不用自己注册 Supabase / 跑初始化 SQL——
+ * 打开面板直接邮箱+密码注册登录即可，数据同样按账号行级隔离（RLS）。
+ * 曾部署过的老用户（localStorage 里已有自己的地址）不受影响，配置仍然生效。
+ */
+const BUILTIN_CLOUD: Pick<CloudSyncConfig, 'supabaseUrl' | 'supabaseAnonKey'> = {
+    supabaseUrl: 'https://lnhwnmylxmythvttosla.supabase.co',
+    supabaseAnonKey: 'sb_publishable_xsbSxvRKhNt8gYrejRiQYg_h9jsPD56',
+};
+
 export function loadCloudSyncConfig(): CloudSyncConfig {
     try {
         const raw = localStorage.getItem(LS_CONFIG);
-        if (!raw) return { supabaseUrl: '', supabaseAnonKey: '', autoSync: false };
+        if (!raw) {
+            // 没有历史配置 → 直接用内置官方服务器（anon key 是发布键，
+            // 设计上就随前端分发，不算秘密；数据行仍只允许登录用户本人读写）
+            return { ...BUILTIN_CLOUD, autoSync: false };
+        }
         const parsed = JSON.parse(raw) as Partial<CloudSyncConfig>;
         return {
-            supabaseUrl: (parsed.supabaseUrl || '').trim(),
-            supabaseAnonKey: (parsed.supabaseAnonKey || '').trim(),
+            supabaseUrl: (parsed.supabaseUrl || BUILTIN_CLOUD.supabaseUrl).trim(),
+            supabaseAnonKey: (parsed.supabaseAnonKey || BUILTIN_CLOUD.supabaseAnonKey).trim(),
             autoSync: parsed.autoSync === true,
         };
     } catch {
-        return { supabaseUrl: '', supabaseAnonKey: '', autoSync: false };
+        return { ...BUILTIN_CLOUD, autoSync: false };
     }
 }
 
