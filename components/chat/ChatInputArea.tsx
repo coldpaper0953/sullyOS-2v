@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { ShareNetwork, Trash, Plus, Smiley, PaperPlaneTilt, Money, BookOpenText, GearSix, Image, Camera, Lock, ArrowsClockwise, ChatCircleDots, CalendarBlank, ForkKnife, Coffee, Code, Brain, PencilSimple, BellSimpleRinging, Alarm, Sparkle, FadersHorizontal, LinkSimple, Star, Briefcase } from '@phosphor-icons/react';
+import { ShareNetwork, Trash, Plus, Smiley, PaperPlaneTilt, Stop, Money, BookOpenText, GearSix, Image, Camera, Lock, ArrowsClockwise, ChatCircleDots, CalendarBlank, ForkKnife, Coffee, Code, Brain, PencilSimple, BellSimpleRinging, Alarm, Sparkle, FadersHorizontal, LinkSimple, Star, Briefcase } from '@phosphor-icons/react';
 import { CharacterProfile, ChatTheme, EmojiCategory, Emoji } from '../../types';
 import { PRESET_THEMES } from './ChatConstants';
 import TokenImg from '../os/TokenImg';
@@ -19,6 +19,8 @@ interface ChatInputAreaProps {
     showPanel: 'none' | 'actions' | 'emojis' | 'chars';
     setShowPanel: (v: 'none' | 'actions' | 'emojis' | 'chars') => void;
     onSend: () => void;
+    /** 生成中点发送按钮 = 终止本次请求。不传则保持原来的「发送」行为。 */
+    onStop?: () => void;
     onDeleteSelected: () => void;
     onForwardSelected?: () => void;
     selectedCount: number;
@@ -66,7 +68,7 @@ interface ChatInputAreaProps {
 
 const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     input, setInput, isTyping, selectionMode,
-    showPanel, setShowPanel, onSend, onDeleteSelected, onForwardSelected, selectedCount,
+    showPanel, setShowPanel, onSend, onStop, onDeleteSelected, onForwardSelected, selectedCount,
     emojis, characters = [], activeCharacterId = '', onCharSelect = () => {},
     unreadMessages = {},
     customThemes = [], onUpdateTheme = () => {}, onRemoveTheme = () => {}, activeThemeId = '',
@@ -117,12 +119,14 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     const useIOSStandaloneInputFix = isIOSStandaloneWebApp();
 
     // 回车只换行、不发送（手机虚拟键盘同理，enterKeyHint 移除 send）；发送一律点按钮。
-    const handleKeyDown = (e: React.KeyboardEvent) => {
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
         if (e.key !== 'Enter') return;
         if (e.nativeEvent.isComposing || e.keyCode === 229) return;
         e.preventDefault();
         const el = e.currentTarget;
-        const { selectionStart, selectionEnd, value } = el;
+        const selectionStart = el.selectionStart ?? el.value.length;
+        const selectionEnd = el.selectionEnd ?? selectionStart;
+        const value = el.value;
         setInput(value.slice(0, selectionStart) + '\n' + value.slice(selectionEnd));
         requestAnimationFrame(() => { el.selectionStart = el.selectionEnd = selectionStart + 1; });
     };
@@ -462,10 +466,15 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                         </button>
                     </div>
                     <button
-                        onClick={onSend}
+                        onClick={isTyping && onStop ? onStop : onSend}
+                        title={isTyping && onStop ? '终止本次请求' : undefined}
                         className={sendButtonClass}
                     >
-                        {sendButtonStyle === 'pill' ? <span>发送</span> : <PaperPlaneTilt className="w-5 h-5" weight="fill" />}
+                        {/* 生成中：同一个位置变「停止」——请求卡住/一直失败时点它立刻断开，
+                            不用等提供方超时，也不会留下失败提示。 */}
+                        {isTyping && onStop
+                            ? (sendButtonStyle === 'pill' ? <span>停止</span> : <Stop className="w-4 h-4" weight="fill" />)
+                            : (sendButtonStyle === 'pill' ? <span>发送</span> : <PaperPlaneTilt className="w-5 h-5" weight="fill" />)}
                     </button>
 
                     {emojiSelectionMode && (

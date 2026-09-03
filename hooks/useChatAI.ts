@@ -1,9 +1,9 @@
 
-import { useState, useRef, useEffect, MutableRefObject } from 'react';
+import { useState, useRef, useEffect, useCallback, MutableRefObject } from 'react';
 import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, GroupProfile, RealtimeConfig, CharacterBuff, Amsg2ExpiredNoticeRecord } from '../types';
 import { DB } from '../utils/db';
 import { ChatPrompts } from '../utils/chatPrompts';
-import { safeFetchJson, safeResponseJson } from '../utils/safeApi';
+import { safeFetchJson, safeResponseJson, setChatAbortSignal } from '../utils/safeApi';
 import { runWithApiFailover } from '../utils/apiFailover';
 import { KeepAlive } from '../utils/keepAlive';
 import { ProactiveChat } from '../utils/proactiveChat';
@@ -492,6 +492,15 @@ export const useChatAI = ({
     const music = useMusic();
 
     const [isTyping, setIsTyping] = useState(false);
+    // 「停止生成」：本轮所有 chat/completions 请求共用这一个 AbortController。
+    // 用户点停止后请求立刻断开（不再等提供方超时），也不会写「回复处理失败」的系统消息。
+    const genAbortRef = useRef<AbortController | null>(null);
+    const stopGeneration = useCallback(() => {
+        const ac = genAbortRef.current;
+        if (!ac || ac.signal.aborted) return false;
+        ac.abort(new DOMException('用户终止生成', 'AbortError'));
+        return true;
+    }, []);
     // 流式预览气泡：stream 开启时，已完成行与安全尾句随增量以临时气泡上屏。
     // 流结束后由 applyAssistantPostProcessing 正常落库渲染，预览随即清空 —— 只影响体感，不改持久化。
     const [streamingBubbles, setStreamingBubbles] = useState<string[]>([]);
@@ -744,6 +753,11 @@ export const useChatAI = ({
             : char;
 
         setIsTyping(true);
+        // 本轮生成的中止句柄：挂到 safeApi 的环境信号上，本轮所有 chat/completions
+        // （主请求 / 故障转移候选 / 工具循环 / 兼容重试）都串在同一个 signal 上。
+        const genAbort = new AbortController();
+        genAbortRef.current = genAbort;
+        setChatAbortSignal(genAbort.signal);
         setStreamingBubbles([]);
         setStreamingThinking('');
         setRecallStatus('');
@@ -2167,9 +2181,12 @@ export const useChatAI = ({
             // 注意: 这个 catch 兜的是「拿到 API 响应之后」的整条后处理管线 (applyAssistantPostProcessing,
             // 13 步)。这里抛错多半不是网络问题, 而是解析/正则/落库异常。别再叫"连接中断"误导排查。
             const errMsg = e?.message || String(e);
-            // 瑞一杯模式下报错: 大概率是聊天模型/中转不支持 function calling(tools) → 带 tools 一发就 400。
-            // 在 APK 里看不到控制台, 这里把完整原因 + 解法存成可读消息, 方便排查。
-            if (luckinChatRef?.current?.active && /\b400\b|tool|function[_\s-]?call/i.test(errMsg)) {
+            // 用户按了「停止」：这是他自己的意图，不写失败系统消息、不弹错，安静收尾即可。
+            if (e?.name === 'AbortError' || genAbort.signal.aborted) {
+                console.log('⏹ [Chat] 本轮生成已被用户终止');
+            } else if (luckinChatRef?.current?.active && /\b400\b|tool|function[_\s-]?call/i.test(errMsg)) {
+                // 瑞一杯模式下报错: 大概率是聊天模型/中转不支持 function calling(tools) → 带 tools 一发就 400。
+                // 在 APK 里看不到控制台, 这里把完整原因 + 解法存成可读消息, 方便排查。
                 await DB.saveMessage({
                     charId: char.id, role: 'system', type: 'text',
                     content: `[瑞一杯失败] ${errMsg}\n\n大概率是你当前聊天用的「模型/中转」不支持函数调用(function calling / tools)——瑞一杯靠角色自己调工具点单, 模型不支持就会直接报 400。\n解决: 换一个支持 tools 的模型/中转 (如官方 OpenAI / Claude / 多数主流中转)。\n另外确认: APK 是全新存储, 你的聊天 API 配置(密钥/地址/模型)在 APK 里填好了吗?`,
@@ -2181,6 +2198,11 @@ export const useChatAI = ({
         } finally {
             KeepAlive.stop();
             setIsTyping(false);
+            // 交还中止句柄（只清自己那一轮的，防止后一轮的 controller 被前一轮的 finally 抹掉）
+            if (genAbortRef.current === genAbort) {
+                genAbortRef.current = null;
+                setChatAbortSignal(null);
+            }
             // 本轮生成结束（成功/失败/中断都经过）→ 停止本地续租；远端靠 45s TTL 自然失效。
             // 未开过租约（instant push / 非 amsg2 角色）时是幂等 no-op。
             stopAmsgChatPresence(char.id);
@@ -2308,6 +2330,8 @@ export const useChatAI = ({
 
     return {
         isTyping,
+        /** 终止本轮生成（返回是否真的中止了一轮在跑的请求）。 */
+        stopGeneration,
         streamingBubbles,
         streamingThinking,
         recallStatus,

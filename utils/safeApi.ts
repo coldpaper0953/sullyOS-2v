@@ -20,6 +20,20 @@ export function isChatCompletionUrl(url: string): boolean {
     return url.includes('/chat/completions');
 }
 
+/**
+ * 「停止生成」用的环境中止信号。
+ *
+ * 一轮聊天生成会连着发好几个 chat/completions（主请求、故障转移候选、工具循环、
+ * 兼容重试……），逐个把 signal 传下去既啰嗦又容易漏。聊天页开始生成时把本轮的
+ * signal 挂在这里，结束时清掉；safeFetchJson 只对 **chat/completions** 生效，
+ * 云同步、图片、Supabase 那些请求一概不受影响。
+ */
+let ambientChatAbortSignal: AbortSignal | null = null;
+
+export function setChatAbortSignal(signal: AbortSignal | null): void {
+    ambientChatAbortSignal = signal;
+}
+
 /** Parse a fetch Response as JSON safely (text-first, then JSON.parse) */
 export async function safeResponseJson(response: Response): Promise<any> {
     const text = await response.text();
@@ -379,6 +393,9 @@ export async function safeFetchJson(
     // 用户切 App 后被错标。safeFetchJson 与全局拦截器以 requestId 原子去重。
     const metaOptions: RequestInit = meta ? { ...options, __sullyMeta: meta } as RequestInit : options;
     const logMeta = meta || getApiCallAmbientContext();
+    // 调用方自己给了 signal 就用它；聊天生成类请求没给的话用本轮的「停止生成」信号。
+    const externalSignal: AbortSignal | undefined = options.signal
+        ?? (isChatCompletionUrl(urlStr) ? (ambientChatAbortSignal ?? undefined) : undefined);
 
     // 图片在本机存成 `blobref:` 令牌，发出去对面读不懂——在这里统一还原成 data URL。
     // 各处构造请求的地方就不用各记一遍这件事了（详见 utils/apiBlobRefs.ts）。
@@ -396,16 +413,18 @@ export async function safeFetchJson(
         // 调用方自己的 options.signal 仍然有效，两者任一触发就 abort
         let attemptOptions = { ...sendOptions, __sullyApiCallId: requestId } as RequestInit;
         let timeoutHandle: any = null;
-        if (timeoutMs > 0) {
+        if (timeoutMs > 0 || externalSignal) {
             const ac = new AbortController();
-            timeoutHandle = setTimeout(() => ac.abort(new Error(`timeout ${timeoutMs}ms`)), timeoutMs);
-            if (options.signal) {
-                // 串联外部 signal：外部 abort 也触发内部
-                if (options.signal.aborted) {
-                    clearTimeout(timeoutHandle);
-                    throw new Error('aborted');
+            if (timeoutMs > 0) {
+                timeoutHandle = setTimeout(() => ac.abort(new Error(`timeout ${timeoutMs}ms`)), timeoutMs);
+            }
+            if (externalSignal) {
+                // 串联外部 / 「停止生成」signal：任一触发就 abort 本次尝试
+                if (externalSignal.aborted) {
+                    if (timeoutHandle) clearTimeout(timeoutHandle);
+                    throw new DOMException('aborted', 'AbortError');
                 }
-                options.signal.addEventListener('abort', () => ac.abort(), { once: true });
+                externalSignal.addEventListener('abort', () => ac.abort(), { once: true });
             }
             attemptOptions = { ...attemptOptions, signal: ac.signal };
         }
@@ -471,6 +490,9 @@ export async function safeFetchJson(
 
             // AbortError（含 timeout）：是否重试看上层策略，先按可重试处理（网络层面）
             const isAbort = e?.name === 'AbortError' || /aborted|timeout/i.test(e?.message || '');
+
+            // 用户按了「停止」：这是明确的意图，不重试、不换候选，原样抛给调用方收尾
+            if (externalSignal?.aborted) throw e;
 
             // Network errors (fetch itself failed) are retryable
             if ((e?.name === 'TypeError' || isAbort) && attempt < automaticRetryLimit) {

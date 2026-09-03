@@ -115,6 +115,8 @@ let lastSeenPrimaryId = '';
 
 function classifyError(error: unknown): 'retry' | 'switch' | 'fatal' {
     const message = error instanceof Error ? error.message : String(error ?? '');
+    // 用户按了「停止生成」：不重试、不换候选，立刻结束整轮
+    if ((error as { name?: string })?.name === 'AbortError') return 'fatal';
     // 401/403/404/模型不存在：重试同一个 API 没有意义，直接换下家
     if (/API Error (401|403|404)/.test(message)) return 'switch';
     // 429 / 5xx / 网络错误 / HTML 错误页 / 超时：可重试
