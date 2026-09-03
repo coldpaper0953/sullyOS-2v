@@ -1317,6 +1317,19 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               const cfg = loadCloudSyncConfig();
               const session = loadCloudSyncSession();
               if (!cfg.autoSync || !session?.accessToken) return;
+              // 逐键设置同步（sully_settings 表）：整包同步会因为「这次的包没带全」把云端已经
+              // 同步好的字段一起抹掉（实测 9 项只剩 5 项，预设/模型列表全丢）。这一层一个键
+              // 一行，只可能覆盖确实写了的键。先拉它，再走下面的整包密钥逻辑。
+              try {
+                  const { bindSyncedSettingsContext, pullSyncedSettings } = await import('../utils/syncedSettings');
+                  const { resolveSecretKey } = await import('../utils/cloudSync');
+                  const settingsKey = await resolveSecretKey(session.userId).catch(() => null);
+                  bindSyncedSettingsContext(() => ({ config: cfg, session, key: settingsKey }));
+                  const applied = await pullSyncedSettings();
+                  if (applied > 0) console.debug('[settings-sync] 从云端取回', applied, '项设置');
+              } catch (e) {
+                  console.warn('[settings-sync] 拉取失败（不影响本地使用）', e);
+              }
               const cloudAt = await cloudSyncPeekSecrets(cfg, session);
               const seenAt = Number(localStorage.getItem('os_cloud_secrets_seen_v1') || '0');
               // 时间戳没变通常就不用动，但有一种情况必须无条件补一次：本机一个凭据都没有
@@ -3401,10 +3414,19 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       setAvailableModels(safeModels);
       localStorage.setItem('os_available_models', JSON.stringify(safeModels));
   };
-  const addApiPreset = (name: string, config: APIConfig) => { setApiPresets(prev => { const next = [...prev, normalizeApiPreset({ id: Date.now().toString(), name, config })]; localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
-  const updateApiPreset = (id: string, name: string, config: APIConfig) => { setApiPresets(prev => { const next = prev.map(p => p.id === id ? normalizeApiPreset({ ...p, name, config }) : p); localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
-  const removeApiPreset = (id: string) => { setApiPresets(prev => { const next = prev.filter(p => p.id !== id); localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
-  const savePresets = (presets: ApiPreset[]) => { const normalized = presets.map(normalizeApiPreset); setApiPresets(normalized); localStorage.setItem('os_api_presets', JSON.stringify(normalized)); };
+  /**
+   * 预设落库 + 通知逐键云同步。
+   * 走 syncedSettings 而不是等整包同步：整包是从 React state 取的，没加载全就上传会把
+   * 云端已同步的字段抹掉（预设长期同步不过去的根因）。这里标脏后 1.2 秒防抖批量 upsert。
+   */
+  const persistPresets = (next: ApiPreset[]) => {
+      localStorage.setItem('os_api_presets', JSON.stringify(next));
+      void import('../utils/syncedSettings').then(m => m.markSyncedSettingDirty('os_api_presets')).catch(() => {});
+  };
+  const addApiPreset = (name: string, config: APIConfig) => { setApiPresets(prev => { const next = [...prev, normalizeApiPreset({ id: Date.now().toString(), name, config })]; persistPresets(next); return next; }); };
+  const updateApiPreset = (id: string, name: string, config: APIConfig) => { setApiPresets(prev => { const next = prev.map(p => p.id === id ? normalizeApiPreset({ ...p, name, config }) : p); persistPresets(next); return next; }); };
+  const removeApiPreset = (id: string) => { setApiPresets(prev => { const next = prev.filter(p => p.id !== id); persistPresets(next); return next; }); };
+  const savePresets = (presets: ApiPreset[]) => { const normalized = presets.map(normalizeApiPreset); setApiPresets(normalized); persistPresets(normalized); };
   const addCharacter = async () => {
     const name = 'New Character';
     // 默认开启 emotionConfig.enabled，让"开日程 = 开情绪"这条隐含约定对新角色也成立。
