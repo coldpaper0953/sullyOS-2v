@@ -28,7 +28,12 @@ const DB_NAME = 'AetherOS_Data';
 // v69：见面·剧情条目与糯米机原生预设。正文继续复用 messages 表，避免再造会话存储。
 // v70：剧场面具箱（原创人物面具）；角色面具仍只存 characterId，不复制神经链接资料。
 // v71：角色小红书伪主页；发帖归属与可删除的自由活动日志分离。
-const DB_VERSION = 72;
+// v72：自主后端 —— backend_sync_queue 离线同步队列 + backend_events 事件本地镜像。
+// v73：（历史事故位）移植时版本号误降到 72，磁盘上已存在 v73 的库——高于代码版本导致
+//      升级回调永不触发，v72 的两张新表一直没建出来（deleteMessages 等报 store 不存在）。
+// v74：修复该事故——版本号推到 74，从任何 ≤74 的旧库（含 v73）升级都会跑一遍幂等建表，
+//      补齐 backend_sync_queue / backend_events 及此前一切缺失的 store。
+const DB_VERSION = 74;
 
 const STORE_CHARACTERS = 'characters';
 const STORE_CHAR_GROUPS = 'character_groups'; // 角色分组定义（角色通过 groupId 指向；与群聊 groups 无关）
