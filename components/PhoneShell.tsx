@@ -2,7 +2,8 @@
 
 
 import React, { useState, useEffect, useMemo, useRef, Suspense } from 'react';
-import { IMPORT_IN_PROGRESS_KEY, useOS } from '../context/OSContext';
+import { useOS } from '../context/OSContext';
+import { IMPORT_IN_PROGRESS_KEY } from '../utils/backupSystem';
 import StatusBar from './os/StatusBar';
 import Launcher from '../apps/Launcher';
 import CompanionLockChrome from './os/CompanionLockChrome';
