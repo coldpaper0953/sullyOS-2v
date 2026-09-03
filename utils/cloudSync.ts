@@ -699,6 +699,24 @@ export async function cloudSyncPull(config: CloudSyncConfig, sessionIn: CloudSyn
     return new Blob([bytes as unknown as BlobPart], { type: 'application/zip' });
 }
 
+/** 只看云端 API 配置（密钥包）有没有更新过——不解密、不下载正文。 */
+export async function cloudSyncPeekSecrets(config: CloudSyncConfig, sessionIn: CloudSyncSession): Promise<number> {
+    assertConfig(config);
+    const session = await cloudSyncRefresh(config, sessionIn);
+    if (!session) return 0;
+    try {
+        const res = await fetch(
+            `${baseUrl(config)}/rest/v1/sully_api_secrets?select=pushed_at&user_id=eq.${encodeURIComponent(session.userId)}&limit=1`,
+            { headers: authHeaders(config, session) },
+        );
+        const rows = await jsonOrThrow(res, '查询密钥时间失败');
+        if (!Array.isArray(rows) || rows.length === 0) return 0;
+        return Number(rows[0].pushed_at) || 0;
+    } catch {
+        return 0;
+    }
+}
+
 /**
  * 拉取敏感字段（API 密钥）明文 JSON。
  * 平时不用传密码：本机记住的密钥（登录时派生、extractable:false 存 IndexedDB）够用，

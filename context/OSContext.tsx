@@ -1259,6 +1259,48 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { cloudPullToastRef.current = addToast; cloudPullImportRef.current = importSystem; });
 
+  // --- 云端账号同步 · 开机单独同步 API 配置 ---
+  // 只在另一台设备改了 API（key/地址/模型）而聊天数据没变时也要跟上：密钥包是独立一行，
+  // 上面那段「数据更新才拉」的逻辑碰不到它。这里只比对密钥包的时间戳，命中就解密后
+  // 直接写进本机运行态——不导入整包、不重启页面。
+  const cloudSecretsCheckedRef = useRef(false);
+  useEffect(() => {
+      if (!isDataLoaded || cloudSecretsCheckedRef.current) return;
+      cloudSecretsCheckedRef.current = true;
+      void (async () => {
+          try {
+              const { loadCloudSyncConfig, loadCloudSyncSession, cloudSyncPeekSecrets, cloudSyncPullSecrets } = await import('../utils/cloudSync');
+              const cfg = loadCloudSyncConfig();
+              const session = loadCloudSyncSession();
+              if (!cfg.autoSync || !session?.accessToken) return;
+              const cloudAt = await cloudSyncPeekSecrets(cfg, session);
+              const seenAt = Number(localStorage.getItem('os_cloud_secrets_seen_v1') || '0');
+              if (!cloudAt || cloudAt <= seenAt) return;
+              const { secretsJson } = await cloudSyncPullSecrets(cfg, session);
+              if (!secretsJson) return;
+              const secrets = JSON.parse(secretsJson) as Record<string, any>;
+              if (secrets.apiConfig) updateApiConfig(secrets.apiConfig);
+              if (Array.isArray(secrets.availableModels) && secrets.availableModels.length > 0) saveModels(secrets.availableModels);
+              if (Array.isArray(secrets.apiPresets)) savePresets(secrets.apiPresets);
+              if (secrets.checkPhoneApi !== undefined) setCheckPhoneApi(secrets.checkPhoneApi ?? null);
+              for (const [field, lsKey] of [
+                  ['studyApiConfig', 'study_api_config'],
+                  ['instantPushConfig', 'instant_push_config_v1'],
+                  ['pushVapid', 'push_vapid_v1'],
+                  ['cloudBackupConfig', 'os_cloud_backup_config'],
+              ] as Array<[string, string]>) {
+                  if (secrets[field] !== undefined) localStorage.setItem(lsKey, JSON.stringify(secrets[field]));
+              }
+              localStorage.setItem('os_cloud_secrets_seen_v1', String(cloudAt));
+              cloudPullToastRef.current('已同步云端的 API 配置', 'success');
+          } catch (e) {
+              console.warn('[云同步] API 配置同步失败（不影响本地）：', e);
+          }
+      })();
+      // updateApiConfig/saveModels/savePresets 定义在后文，闭包在 effect 执行时才取用
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDataLoaded]);
+
   // --- Global Error Interception ---
   useEffect(() => {
       if (interceptorsInitialized.current) return;
