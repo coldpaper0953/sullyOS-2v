@@ -52,6 +52,19 @@ insert into sully_heartbeat (id, beat_at)
 values (1, (extract(epoch from now()) * 1000)::bigint)
 on conflict (id) do update set beat_at = (extract(epoch from now()) * 1000)::bigint;
 
+-- 3.5 API 密钥等敏感字段（可选加密）：整包明文备份里已剥掉这些字段，
+--      它们单独加密（账号密码派生密钥）后存这张表。不推密钥 = 表里没行，
+--      换设备拉明文数据照常，只是 API 密钥不自动跟随。
+create table if not exists sully_api_secrets (
+  user_id uuid primary key,
+  envelope text not null default '',             -- CipherEnvelope JSON（PBKDF2+AES-GCM）
+  pushed_at bigint not null default 0
+);
+alter table sully_api_secrets enable row level security;
+drop policy if exists " own secrets only " on sully_api_secrets;
+create policy " own secrets only " on sully_api_secrets
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
 -- 3. 行级安全：只有登录用户本人能动自己的行
 alter table sully_user_data enable row level security;
 drop policy if exists " own row only " on sully_user_data;
@@ -411,29 +424,46 @@ export const QUOTA_WARN_BYTES = 400 * 1024 * 1024;
 export interface PushOptions {
     /** 「设置 → 导出备份」text_only 档的 zip Blob（调用方经 exportSystem 生成，含 API 配置等全部设置）。 */
     zipBlob: Blob;
+    /** 敏感字段（API 配置等）的明文 JSON 字符串——存进 zip 前已从中剥出；单独加密上传。 */
+    secretsJson?: string;
     deviceLabel?: string;
     onProgress?: (msg: string) => void;
-    /** 端到端加密口令（= 账号密码）。不传则拒绝上传——明文备份不允许落库。 */
-    password: string;
+    /**
+     * 敏感字段加密口令（= 账号密码）。不传/为空 = 跳过密钥上传（明文数据照常推）。
+     * v2 架构：普通数据（角色/聊天/设置）明文同步（RLS 行级隔离，只有本人可读），
+     * 只有 API 密钥这批敏感字段必须加密后另存一张表。
+     */
+    password?: string;
 }
+
+/**
+ * zip 里属于「敏感字段」的顶层键：从明文包里剥出来（推到 sully_api_secrets 前），
+ * 恢复时再合并回去。名单 = FullBackupData 里含 API key / token 的字段。
+ */
+export const SECRET_BACKUP_KEYS = [
+    'apiConfig',          // 全局 API（key，visionApi 识图 key 也在里面）
+    'apiPresets',         // 每个预设都带 key
+    'availableModels',    // 模型列表（与 API 配置配套，不带它恢复后下拉会空）
+    'checkPhoneApi',      // 查岗 API
+    'instantPushConfig',  // Worker 地址+token
+    'pushVapid',          // VAPID 密钥对
+    'studyApiConfig',     // 自习室 API
+    'amsg2GlobalConfig',  // 主动消息 2.0 共享密钥/AMSG_MASTER_KEY
+    'cloudBackupConfig',  // WebDAV/GitHub Releases 备份凭据
+] as const;
 
 export async function cloudSyncPush(config: CloudSyncConfig, sessionIn: CloudSyncSession, opts: PushOptions): Promise<{ rawBytes: number; gzipBytes: number }> {
     assertConfig(config);
-    if (!opts.password) throw new Error('缺少加密口令：云端备份必须加密后上传');
     const session = await cloudSyncRefresh(config, sessionIn);
     if (!session) throw new CloudSyncApiError('登录已过期，请重新登录', 401);
 
-    opts.onProgress?.('正在端到端加密备份包…');
-    const envelope = await encryptBlob(opts.password, opts.zipBlob);
-    // 密封信封再 gzip（密文高熵压不动，但 metadata 可压）——信封尺寸 ≈ 明文 + 16B GCM 标签。
-    const envelopeBlob = new Blob([JSON.stringify(envelope)], { type: 'application/json' });
-
+    // 明文数据包直接 gzip 上传（RLS 行级隔离：只有本人 JWT 能读写这一行）
     opts.onProgress?.('正在 gzip 压缩…');
-    const { gzipB64, gzipBytes } = await gzipBytesToB64(envelopeBlob);
+    const { gzipB64, gzipBytes } = await gzipBytesToB64(opts.zipBlob);
     const rawBytes = opts.zipBlob.size;
     if (gzipBytes > QUOTA_WARN_BYTES) {
         throw new Error(
-            `加密压缩后仍有 ${(gzipBytes / 1024 / 1024).toFixed(1)}MB，接近免费套餐 500MB 上限。` +
+            `压缩后仍有 ${(gzipBytes / 1024 / 1024).toFixed(1)}MB，接近免费套餐 500MB 上限。` +
             '建议先在「设置 → 数据管理」里清理旧媒体的聊天记录/相册再同步，或升级 Supabase 套餐。'
         );
     }
@@ -444,7 +474,7 @@ export async function cloudSyncPush(config: CloudSyncConfig, sessionIn: CloudSyn
         gzip_b64: gzipB64,
         raw_bytes: rawBytes,
         gzip_bytes: gzipBytes,
-        snapshot_version: 1,
+        snapshot_version: 2,
         device_label: opts.deviceLabel || (navigator.userAgent || '').slice(0, 60),
         pushed_at: Date.now(),
     };
@@ -454,6 +484,19 @@ export async function cloudSyncPush(config: CloudSyncConfig, sessionIn: CloudSyn
         body: JSON.stringify(body),
     });
     await jsonOrThrow(res, '上传失败');
+    // 本机推送水位：开机自动拉新时与云端 pushed_at 对比，云端不比这个新就不动本地
+    // （本机就是最后推的设备 → 拉回来只会拿到自己的数据，白白覆盖一次运行态）。
+    try { localStorage.setItem('os_cloud_sync_last_push_v1', String(Date.now())); } catch { /* ignore */ }
+    if (opts.secretsJson && opts.password) {
+        opts.onProgress?.('正在加密 API 密钥…');
+        const envelope = await encryptBlob(opts.password, new Blob([opts.secretsJson], { type: 'application/json' }));
+        const secRes = await fetch(`${baseUrl(config)}/rest/v1/sully_api_secrets`, {
+            method: 'POST',
+            headers: { ...authHeaders(config, session), Prefer: 'resolution=merge-duplicates' },
+            body: JSON.stringify({ user_id: session.userId, envelope: JSON.stringify(envelope), pushed_at: Date.now() }),
+        });
+        await jsonOrThrow(secRes, 'API 密钥上传失败');
+    }
     // 心跳顺带 touch（失败无所谓）
     void fetch(`${baseUrl(config)}/rest/v1/sully_heartbeat?id=eq.1`, {
         method: 'PATCH',
@@ -489,15 +532,26 @@ export async function cloudSyncPeek(config: CloudSyncConfig, sessionIn: CloudSyn
     };
 }
 
-/** 拉取并解压解密云端备份 zip（不写入本地——写入由调用方按需确认后走 importSystem，与手动导入同一管道）。 */
+export interface CloudPullResult {
+    zipBlob: Blob;
+    /** 云端有且解密成功的敏感字段明文 JSON（v2 分离格式）；null = 没有/未解密。 */
+    secretsJson: string | null;
+    /** 云端有加密密钥但没给密码（数据可用，API 密钥待解锁）。 */
+    secretsLocked: boolean;
+}
+
+/**
+ * 拉取云端备份 zip（不写入本地——写入由调用方走 importSystem 管道）。
+ * v2 分离格式：明文数据包免密可拉；API 密钥等敏感字段有密码才解密返回。
+ * v1 旧格式（整包加密）：必须提供 password 才能解开。
+ */
 export async function cloudSyncPull(config: CloudSyncConfig, sessionIn: CloudSyncSession, password: string, onProgress?: (msg: string) => void): Promise<Blob> {
     assertConfig(config);
-    if (!password) throw new Error('缺少解密口令');
     const session = await cloudSyncRefresh(config, sessionIn);
     if (!session) throw new CloudSyncApiError('登录已过期，请重新登录', 401);
     onProgress?.('正在下载云端备份…');
     const res = await fetch(
-        `${baseUrl(config)}/rest/v1/sully_user_data?select=gzip_b64&user_id=eq.${encodeURIComponent(session.userId)}&limit=1`,
+        `${baseUrl(config)}/rest/v1/sully_user_data?select=gzip_b64,snapshot_version&user_id=eq.${encodeURIComponent(session.userId)}&limit=1`,
         { headers: authHeaders(config, session) },
     );
     const rows = await jsonOrThrow(res, '下载失败');
@@ -506,11 +560,47 @@ export async function cloudSyncPull(config: CloudSyncConfig, sessionIn: CloudSyn
     }
     onProgress?.('正在解压…');
     const bytes = await gunzipB64ToBytes(rows[0].gzip_b64);
-    onProgress?.('正在解密…');
-    const envelope = JSON.parse(new TextDecoder().decode(bytes)) as CipherEnvelope;
-    const zipBlob = await decryptEnvelope(password, envelope);
-    onProgress?.('解密完成');
-    return zipBlob;
+    // v2 明文：字节就是 zip 本身；v1 旧整包：字节是 CipherEnvelope JSON，需密码解密
+    const head = new TextDecoder().decode(bytes.subarray(0, 16));
+    if (head.includes('SULLYE2E1')) {
+        if (!password) throw new Error('云端是旧版整包加密备份，需要账号密码解锁后才能拉取（新上传会自动转成免密格式）');
+        onProgress?.('正在解密…');
+        const envelope = JSON.parse(new TextDecoder().decode(bytes)) as CipherEnvelope;
+        const zipBlob = await decryptEnvelope(password, envelope);
+        onProgress?.('解密完成');
+        return zipBlob;
+    }
+    onProgress?.('下载完成');
+    return new Blob([bytes as unknown as BlobPart], { type: 'application/zip' });
+}
+
+/**
+ * 拉取敏感字段（API 密钥）明文 JSON。云端没推过密钥 → null；
+ * 密码错误/未提供 → secretsLocked 不抛错（数据主包已可用）。
+ */
+export async function cloudSyncPullSecrets(
+    config: CloudSyncConfig,
+    sessionIn: CloudSyncSession,
+    password: string,
+): Promise<{ secretsJson: string | null; locked: boolean }> {
+    assertConfig(config);
+    if (!password) return { secretsJson: null, locked: false };
+    const session = await cloudSyncRefresh(config, sessionIn);
+    if (!session) return { secretsJson: null, locked: false };
+    try {
+        const res = await fetch(
+            `${baseUrl(config)}/rest/v1/sully_api_secrets?select=envelope&user_id=eq.${encodeURIComponent(session.userId)}&limit=1`,
+            { headers: authHeaders(config, session) },
+        );
+        const rows = await jsonOrThrow(res, '查询密钥失败');
+        if (!Array.isArray(rows) || rows.length === 0 || !rows[0]?.envelope) return { secretsJson: null, locked: false };
+        const envelope = JSON.parse(rows[0].envelope) as CipherEnvelope;
+        const blob = await decryptEnvelope(password, envelope);
+        return { secretsJson: await blob.text(), locked: false };
+    } catch {
+        // 密码不对/表还没建/网络问题：数据主包不受影响
+        return { secretsJson: null, locked: true };
+    }
 }
 
 /** 登录用户的 localStorage 设置快照（MIRRORED_KEYS 同批：API 配置等小设置）。 */
@@ -523,6 +613,46 @@ export function snapshotMirroredSettings(): Record<string, string> {
         } catch { /* ignore */ }
     }
     return out;
+}
+
+// ─── v2 备份包敏感字段拆分 / 合并（jszip）────────────────────────────
+
+/**
+ * 备份 zip 的敏感字段拆在哪？「设置 → 导出备份」的 v2/v3 分片格式里，非数组字段
+ * 全在 metadata.json（apiConfig/apiPresets 等都在里面）。这里做的是：
+ *   - 读 metadata.json，把 SECRET_BACKUP_KEYS 里的字段移进 secrets 并从原文件删除
+ *   - 返回改写后的【明文数据包 zip】与【敏感字段 JSON 字符串】
+ * 单文件 data.json 的 v1 老格式同理处理（整个对象就是根）。
+ */
+export async function splitBackupSecrets(zipBlob: Blob): Promise<{ publicZip: Blob; secretsJson: string }> {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(zipBlob);
+    const metaFile = zip.file('metadata.json') || zip.file('data.json');
+    if (!metaFile) throw new Error('备份包里找不到 metadata.json/data.json');
+    const meta = JSON.parse(await metaFile.async('string'));
+    const secrets: Record<string, unknown> = {};
+    for (const key of SECRET_BACKUP_KEYS) {
+        if (meta[key] !== undefined) {
+            secrets[key] = meta[key];
+            delete meta[key];
+        }
+    }
+    zip.file(metaFile.name, JSON.stringify(meta));
+    const publicZip = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+    return { publicZip, secretsJson: JSON.stringify(secrets) };
+}
+
+/** 恢复端合并：把解密出的敏感字段塞回明文数据包的 metadata，产出可直接 importSystem 的 zip。 */
+export async function mergeBackupSecrets(publicZipBlob: Blob, secretsJson: string): Promise<Blob> {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(publicZipBlob);
+    const metaFile = zip.file('metadata.json') || zip.file('data.json');
+    if (!metaFile) throw new Error('数据包里找不到 metadata.json/data.json');
+    const meta = JSON.parse(await metaFile.async('string'));
+    const secrets = JSON.parse(secretsJson) as Record<string, unknown>;
+    for (const [k, v] of Object.entries(secrets)) meta[k] = v;
+    zip.file(metaFile.name, JSON.stringify(meta));
+    return zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
 }
 
 /** 从备份恢复 localStorage 设置（只回填备份里带的键；现有值由调用方决定是否覆盖）。 */

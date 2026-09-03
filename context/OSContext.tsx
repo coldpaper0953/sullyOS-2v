@@ -1141,17 +1141,16 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   // autoSync 开 + 已登录：页面隐藏（切走/最小化/关机前 pagehide）时把本机数据
   // 静默推到用户自己的 Supabase。失败只 console.warn——自动链路不打扰用户，
   // 手动上传入口在 设置 → 云端账号同步。push 与手动按钮同一条 exportSystem 管道。
-  // 端到端加密：push 需要账号密码派生密钥。密码不能持久化，登录后缓存在
-  // sessionStorage（浏览器会话级——关浏览器即清，不落磁盘），刷新页面仍在；
-  // 没解锁时自动链路跳过（设置面板里手动输入一次即可恢复自动加密上传）。
+  // v2：普通数据（角色/聊天/设置）明文推送（RLS 行级隔离），不再需要口令；
+  // API 密钥等敏感字段拆出单独加密，口令缓存在 sessionStorage（会话级，关浏览器清）——
+  // 没解锁时数据照常自动同步，只是密钥部分跳过。
   const cloudAutoSyncReady = () => {
       try {
           const cfgRaw = localStorage.getItem('os_cloud_sync_config_v1');
           const sessRaw = localStorage.getItem('os_cloud_sync_session_v1');
           const cfg = cfgRaw ? JSON.parse(cfgRaw) : null;
           const sess = sessRaw ? JSON.parse(sessRaw) : null;
-          const unlocked = Boolean(sessionStorage.getItem('os_cloud_sync_pass_v1'));
-          return Boolean(unlocked && cfg?.autoSync && sess?.accessToken && cfg?.supabaseUrl && cfg?.supabaseAnonKey);
+          return Boolean(cfg?.autoSync && sess?.accessToken && cfg?.supabaseUrl && cfg?.supabaseAnonKey);
       } catch { return false; }
   };
   const cloudAutoSyncRef = useRef(false);
@@ -1164,16 +1163,21 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           cloudAutoSyncRef.current = true;
           void (async () => {
               try {
-                  const { loadCloudSyncConfig, loadCloudSyncSession, cloudSyncPush } = await import('../utils/cloudSync');
+                  const { loadCloudSyncConfig, loadCloudSyncSession, cloudSyncPush, splitBackupSecrets } = await import('../utils/cloudSync');
                   const cfg = loadCloudSyncConfig();
                   const session = loadCloudSyncSession();
                   if (!cfg.autoSync || !session || !cfg.supabaseUrl || !cfg.supabaseAnonKey) return;
                   const password = sessionStorage.getItem('os_cloud_sync_pass_v1') || '';
-                  if (!password) return;
                   const exportFn = cloudAutoSyncExportRef.current;
                   if (!exportFn) return;
                   const zipBlob = await exportFn();
-                  await cloudSyncPush(cfg, session, { zipBlob, password, deviceLabel: 'auto-sync' });
+                  const { publicZip, secretsJson } = await splitBackupSecrets(zipBlob);
+                  await cloudSyncPush(cfg, session, {
+                      zipBlob: publicZip,
+                      secretsJson,
+                      password: password || undefined,
+                      deviceLabel: 'auto-sync',
+                  });
               } catch (e) {
                   console.warn('[云同步] 自动上传失败（不影响本地数据）：', e);
               } finally {
@@ -1193,6 +1197,47 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   // exportSystem 定义在后文（组件体内）——挂进 ref 供上面的自动同步闭包取最新版
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { cloudAutoSyncExportRef.current = () => exportSystem('text_only'); });
+
+  // --- 云端账号同步 · 开机自动拉新 ---
+  // v2 免密数据：登录状态下启动时对比云端 pushed_at 与本机上次同步时间，
+  // 云端更新（别台设备推过）→ 自动静默拉回合并。冲突策略保守：云端更新才动，
+  // 本机更新的数据在下次页面隐藏时自动推上去，两台设备轮流交替不会互相覆盖丢失。
+  // addToast / importSystem 定义在组件体后段（3659/4838 行附近）——经 ref 取最新版，
+  // 避免 use-before-declaration。
+  const cloudPullToastRef = useRef<(msg: string, type?: Toast['type']) => void>(() => {});
+  const cloudPullImportRef = useRef<(f: File | string) => Promise<void>>(async () => {});
+  const cloudPullCheckedRef = useRef(false);
+  useEffect(() => {
+      if (!isDataLoaded || cloudPullCheckedRef.current) return;
+      cloudPullCheckedRef.current = true;
+      void (async () => {
+          try {
+              const cfg = (() => { try { return JSON.parse(localStorage.getItem('os_cloud_sync_config_v1') || 'null'); } catch { return null; } })();
+              const session = (() => { try { return JSON.parse(localStorage.getItem('os_cloud_sync_session_v1') || 'null'); } catch { return null; } })();
+              if (!cfg?.autoSync || !session?.accessToken) return;
+              const lastLocalSync = Number(localStorage.getItem('os_cloud_sync_last_push_v1') || '0');
+              const { cloudSyncPeek } = await import('../utils/cloudSync');
+              const meta = await cloudSyncPeek(cfg, session).catch(() => null);
+              if (!meta || meta.pushedAt <= lastLocalSync) return; // 云端没更新（或本机就是最后推的）→ 不动
+              // 云端有别台设备的新数据 → 静默拉回（免密数据包；API 密钥若已解锁也一并合并）
+              const { cloudSyncPull, cloudSyncPullSecrets, mergeBackupSecrets } = await import('../utils/cloudSync');
+              const dataZip = await cloudSyncPull(cfg, session, '', undefined).catch(() => null);
+              if (!dataZip) return;
+              let finalZip = dataZip;
+              const password = sessionStorage.getItem('os_cloud_sync_pass_v1') || '';
+              if (password) {
+                  const { secretsJson } = await cloudSyncPullSecrets(cfg, session, password).catch(() => ({ secretsJson: null as string | null }));
+                  if (secretsJson) finalZip = await mergeBackupSecrets(dataZip, secretsJson);
+              }
+              await cloudPullImportRef.current(new File([finalZip], 'sully_cloud_sync.zip', { type: 'application/zip' }));
+              cloudPullToastRef.current('已从云端同步另一台设备的最新数据', 'success');
+          } catch (e) {
+              console.warn('[云同步] 开机拉新失败（不影响本地数据）：', e);
+          }
+      })();
+  }, [isDataLoaded]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { cloudPullToastRef.current = addToast; cloudPullImportRef.current = importSystem; });
 
   // --- Global Error Interception ---
   useEffect(() => {
