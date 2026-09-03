@@ -72,7 +72,7 @@ import { installReiSW } from '@rei-standard/amsg-sw';
  *            收到推送那一刻的窗口可见性算，用户看着页面时安静、切后台照常响铃震动。
  *            老 SW 把这个字符串当真值，会一律静音。
  */
-const SW_VERSION = '1.17.0';
+const SW_VERSION = '1.18.0';
 
 const PING_INTERVAL = 15_000;
 const MAX_MANUAL_ALIVE_MS = 5 * 60_000;
@@ -805,10 +805,80 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
   }
 });
 
+// ─── 可安装 PWA 的应用外壳缓存 ─────────────────────────────────
+// 装成 App（Edge/Chrome「安装」、手机「添加到主屏幕」）的硬性条件之一：
+// Service Worker 得能在离线时给导航请求返回 200。缓存名带 SW 版本号，换版本即换壳。
+const SHELL_CACHE_PREFIX = 'sullyos-shell-';
+const SHELL_CACHE = `${SHELL_CACHE_PREFIX}${SW_VERSION}`;
+const shellUrl = () => new URL('./', sw.location.href).href;
+
 sw.addEventListener('install', () => {
   void sw.skipWaiting();
+  void (async () => {
+    try {
+      const cache = await caches.open(SHELL_CACHE);
+      const base = shellUrl();
+      await cache.addAll([
+        base,
+        base + 'manifest.webmanifest',
+        base + 'icons/icon-192.png',
+        base + 'icons/icon-512.png',
+      ].map(u => new Request(u, { cache: 'reload' })));
+    } catch { /* 某个文件拿不到不该拖垮安装 */ }
+  })();
 });
 
 sw.addEventListener('activate', (event: ExtendableEvent) => {
-  event.waitUntil(sw.clients.claim());
+  event.waitUntil((async () => {
+    await sw.clients.claim();
+    try {
+      const names = await caches.keys();
+      await Promise.all(names.filter(n => n.startsWith(SHELL_CACHE_PREFIX) && n !== SHELL_CACHE).map(n => caches.delete(n)));
+    } catch { /* ignore */ }
+  })());
+});
+
+// 策略刻意保守，因为这个项目最怕「装完之后一直跑旧代码」：
+//   · 导航请求（打开 App）：先走网络，拿到就顺手更新外壳缓存；断网才回缓存的 index.html
+//   · /assets/xxx-HASH.js|css：文件名带内容哈希，改一个字节文件名就变，所以缓存优先安全又快
+//   · 其它一切（API、Supabase、字体 CDN……）：完全不插手，直接走网络
+sw.addEventListener('fetch', (event: FetchEvent) => {
+  const req = event.request;
+  if (req.method !== 'GET') return;
+  let url: URL;
+  try { url = new URL(req.url); } catch { return; }
+  if (url.origin !== sw.location.origin) return; // 跨域（模型接口/Supabase/CDN）一律不碰
+
+  if (req.mode === 'navigate') {
+    event.respondWith((async () => {
+      try {
+        const fresh = await fetch(req);
+        try {
+          const cache = await caches.open(SHELL_CACHE);
+          await cache.put(shellUrl(), fresh.clone());
+        } catch { /* 缓存写失败不影响本次访问 */ }
+        return fresh;
+      } catch {
+        const cached = await caches.match(shellUrl());
+        if (cached) return cached;
+        throw new Error('offline and no cached shell');
+      }
+    })());
+    return;
+  }
+
+  if (/\/assets\/[^/]+-[A-Za-z0-9_-]{6,}\.(js|css|woff2?)$/.test(url.pathname)) {
+    event.respondWith((async () => {
+      const cached = await caches.match(req);
+      if (cached) return cached;
+      const fresh = await fetch(req);
+      if (fresh.ok) {
+        try {
+          const cache = await caches.open(SHELL_CACHE);
+          await cache.put(req, fresh.clone());
+        } catch { /* ignore */ }
+      }
+      return fresh;
+    })());
+  }
 });

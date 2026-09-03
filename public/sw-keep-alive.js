@@ -1579,7 +1579,7 @@ async function removeQueuedRequest(id) {
 }
 
 // worker/sw-keep-alive.ts
-var SW_VERSION = "1.17.0";
+var SW_VERSION = "1.18.0";
 var PING_INTERVAL = 15e3;
 var MAX_MANUAL_ALIVE_MS = 5 * 6e4;
 var ACTIVE_MSG_DB_NAME = "ActiveMsg";
@@ -2116,9 +2116,76 @@ sw.addEventListener("message", (event) => {
       break;
   }
 });
+var SHELL_CACHE_PREFIX = "sullyos-shell-";
+var SHELL_CACHE = `${SHELL_CACHE_PREFIX}${SW_VERSION}`;
+var shellUrl = () => new URL("./", sw.location.href).href;
 sw.addEventListener("install", () => {
   void sw.skipWaiting();
+  void (async () => {
+    try {
+      const cache = await caches.open(SHELL_CACHE);
+      const base = shellUrl();
+      await cache.addAll([
+        base,
+        base + "manifest.webmanifest",
+        base + "icons/icon-192.png",
+        base + "icons/icon-512.png"
+      ].map((u) => new Request(u, { cache: "reload" })));
+    } catch {
+    }
+  })();
 });
 sw.addEventListener("activate", (event) => {
-  event.waitUntil(sw.clients.claim());
+  event.waitUntil((async () => {
+    await sw.clients.claim();
+    try {
+      const names = await caches.keys();
+      await Promise.all(names.filter((n) => n.startsWith(SHELL_CACHE_PREFIX) && n !== SHELL_CACHE).map((n) => caches.delete(n)));
+    } catch {
+    }
+  })());
+});
+sw.addEventListener("fetch", (event) => {
+  const req = event.request;
+  if (req.method !== "GET") return;
+  let url;
+  try {
+    url = new URL(req.url);
+  } catch {
+    return;
+  }
+  if (url.origin !== sw.location.origin) return;
+  if (req.mode === "navigate") {
+    event.respondWith((async () => {
+      try {
+        const fresh = await fetch(req);
+        try {
+          const cache = await caches.open(SHELL_CACHE);
+          await cache.put(shellUrl(), fresh.clone());
+        } catch {
+        }
+        return fresh;
+      } catch {
+        const cached = await caches.match(shellUrl());
+        if (cached) return cached;
+        throw new Error("offline and no cached shell");
+      }
+    })());
+    return;
+  }
+  if (/\/assets\/[^/]+-[A-Za-z0-9_-]{6,}\.(js|css|woff2?)$/.test(url.pathname)) {
+    event.respondWith((async () => {
+      const cached = await caches.match(req);
+      if (cached) return cached;
+      const fresh = await fetch(req);
+      if (fresh.ok) {
+        try {
+          const cache = await caches.open(SHELL_CACHE);
+          await cache.put(req, fresh.clone());
+        } catch {
+        }
+      }
+      return fresh;
+    })());
+  }
 });

@@ -35,6 +35,7 @@ import VersionInfo from '../components/settings/VersionInfo';
 import BackendSettings from '../components/settings/BackendSettings';
 import CloudSyncSettings from '../components/settings/CloudSyncSettings';
 import StorageGuardSettings from '../components/settings/StorageGuardSettings';
+import InstallAppSettings from '../components/settings/InstallAppSettings';
 import { isPushVapidReady } from '../utils/pushVapid';
 import ApiCallLogModal from '../components/settings/ApiCallLogModal';
 import StorageUsagePanel from '../components/settings/StorageUsagePanel';
@@ -3566,6 +3567,9 @@ const Settings: React.FC = () => {
 
         {/* ───────── 存储保护（500MB 过载保护 + AI 分层摘要） ───────── */}
         <StorageGuardSettings />
+
+        {/* ───────── 安装到桌面（PWA 独立窗口，数据与浏览器共用一份） ───────── */}
+        <InstallAppSettings />
 
         <VersionInfo />
 
