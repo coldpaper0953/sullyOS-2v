@@ -1366,7 +1366,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               //    首轮还要 seed：云端没有这个键但本机有，就把本机这份推上去，
               //    否则表一直是空的、别的设备永远拉不到东西。 ──
               try {
-                  const { bindSyncedSettingsContext, pullSyncedSettings, seedSyncedSettings } = await import('../utils/syncedSettings');
+                  const { bindSyncedSettingsContext, pullSyncedSettings, seedSyncedSettings, startSyncedSettingsWatch } = await import('../utils/syncedSettings');
                   bindSyncedSettingsContext(() => ({ config: cfg, session, key: settingsKey }));
                   const applied = await pullSyncedSettings();
                   const seeded = await seedSyncedSettings();
@@ -1374,6 +1374,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   if (applied > 0) {
                       void import('../utils/lsMirror').then(m => m.snapshotLocalStorageMirror()).catch(() => {});
                   }
+                  // 不用重启也能同步：回到前台/重新聚焦时补拉一次，页面隐藏时把攒着的改动推走
+                  startSyncedSettingsWatch(n => {
+                      void import('../utils/lsMirror').then(m => m.snapshotLocalStorageMirror()).catch(() => {});
+                      cloudPullToastRef.current(`已同步云端的 ${n} 项设置`, 'success');
+                  });
               } catch (e) {
                   console.warn('[settings-sync] 逐键同步失败（不影响本地使用）', e);
               }

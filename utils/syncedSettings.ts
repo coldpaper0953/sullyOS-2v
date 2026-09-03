@@ -38,6 +38,7 @@ const TABLE = 'sully_settings';
 let dirty = new Set<string>();
 let timer: ReturnType<typeof setTimeout> | null = null;
 let flushing = false;
+let stopWatch: (() => void) | null = null;
 
 /** 由 OSContext 在登录态就绪后注入，拿不到就说明没登录——静默跳过所有同步。 */
 let resolveCtx: (() => { config: CloudSyncConfig; session: CloudSyncSession; key: CryptoKey | null } | null) | null = null;
@@ -85,13 +86,13 @@ async function openValue(key: CryptoKey, stored: string): Promise<string | null>
 }
 
 function restBase(config: CloudSyncConfig): string {
-    return `${String((config as { url?: string }).url || '').replace(/\/+$/, '')}/rest/v1/${TABLE}`;
+    return `${config.supabaseUrl.replace(/\/+$/, '')}/rest/v1/${TABLE}`;
 }
 
 function headers(config: CloudSyncConfig, session: CloudSyncSession): Record<string, string> {
     return {
-        apikey: (config as { anonKey?: string }).anonKey || '',
-        Authorization: `Bearer ${(session as { accessToken?: string }).accessToken || ''}`,
+        apikey: config.supabaseAnonKey,
+        Authorization: `Bearer ${session.accessToken}`,
         'Content-Type': 'application/json',
     };
 }
@@ -159,7 +160,7 @@ export async function flushSyncedSettings(): Promise<number> {
     try {
         const now = Date.now();
         const rows: Array<Record<string, unknown>> = [];
-        const userId = (session as { userId?: string }).userId || '';
+        const userId = session.userId;
         for (const k of pending) {
             const raw = localStorage.getItem(k);
             if (raw == null) continue; // 删除语义单独走 deleteSyncedSetting
@@ -218,6 +219,41 @@ export async function seedSyncedSettings(): Promise<number> {
     } catch {
         return 0;
     }
+}
+
+/**
+ * 不用重启也能同步：页面回到前台 / 重新获得焦点时补拉一次（20 秒内不重复拉）。
+ *
+ * 用户的原话是「能不能不要重启的同步」——开机拉一次不够，换设备改完再切回来，
+ * 这台得自己发现。返回取消监听的函数，交给 OSContext 的清理逻辑。
+ */
+export function startSyncedSettingsWatch(onApplied?: (n: number) => void): () => void {
+    if (stopWatch) return stopWatch; // 幂等：开机那条异步链可能跑多次，别叠监听
+    let last = 0;
+    const tick = () => {
+        if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+        const now = Date.now();
+        if (now - last < 20_000) return;
+        last = now;
+        void pullSyncedSettings().then(n => { if (n > 0) onApplied?.(n); });
+    };
+    const onVis = () => tick();
+    const onFocus = () => tick();
+    // 页面即将隐藏时把攒着的改动立刻推走，别等那 1.2 秒的防抖（可能等不到）
+    const onHide = () => { void flushSyncedSettings(); };
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVis);
+    if (typeof window !== 'undefined') {
+        window.addEventListener('focus', onFocus);
+        window.addEventListener('pagehide', onHide);
+    }
+    return () => {
+        if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVis);
+        if (typeof window !== 'undefined') {
+            window.removeEventListener('focus', onFocus);
+            window.removeEventListener('pagehide', onHide);
+        }
+        stopWatch = null;
+    };
 }
 
 /** 删除一个设置键（本地已删，云端也要删，否则下次开机又被拉回来）。 */
