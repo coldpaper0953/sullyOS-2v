@@ -1155,11 +1155,22 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   };
   const cloudAutoSyncRef = useRef(false);
   const cloudAutoSyncExportRef = useRef<(() => Promise<Blob>) | null>(null);
+  // 自动上传的安全闸：只有「数据已加载完 且 本机确实有角色」时才允许推。
+  // 否则一次浏览器驱逐 IndexedDB（移动端存储紧张时真的会发生）之后打开页面，
+  // 自动上传会把空档推上云端，把另一台设备的数据顶掉——这条闸把它挡住，
+  // 用户真想清空则走「高级操作 → 立刻上传」手动确认。
+  const cloudPushGuardRef = useRef({ dataLoaded: false, charCount: 0 });
+  cloudPushGuardRef.current = { dataLoaded: isDataLoaded, charCount: characters.length };
   useEffect(() => {
       const handler = () => {
           if (document.visibilityState !== 'hidden' && !(window as any).__cloudPageHide) return;
           (window as any).__cloudPageHide = false;
           if (cloudAutoSyncRef.current || !cloudAutoSyncReady()) return;
+          const guard = cloudPushGuardRef.current;
+          if (!guard.dataLoaded || guard.charCount === 0) {
+              console.warn('[云同步] 本机数据尚未就绪/为空，跳过这次自动上传（避免用空档覆盖云端）');
+              return;
+          }
           cloudAutoSyncRef.current = true;
           void (async () => {
               try {
