@@ -1015,7 +1015,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               }]
           });
       } catch {
-          console.log('[Proactive] Native notification skipped');
+          // 原生通知仅在 Capacitor 原生壳里可用；网页端预期走不到这里，静默即可。
       }
   }, []);
 
@@ -1663,7 +1663,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   useEffect(() => {
     const loadSettings = async () => {
-        // ... (existing load logic)
         const savedThemeStr = localStorage.getItem('os_theme');
         const savedApi = localStorage.getItem('os_api_config');
         const savedModels = localStorage.getItem('os_available_models');
@@ -2537,7 +2536,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
           if (char.proactiveConfig && !char.proactiveConfig.enabled) {
               drainQueuedProactive();
-              console.log(`🔕 [Proactive/Global] Skipped for ${char.name}: disabled`);
               return;
           }
 
@@ -2546,7 +2544,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // lastFire 已在调度层记录，下个周期会重新评估。
           if (activeAppRef.current === AppID.Date && activeCharIdScheduleRef.current === charId) {
               drainQueuedProactive();
-              console.log(`🔕 [Proactive/Global] Skipped for ${char.name}: 正在见面 (DateApp active)`);
               return;
           }
 
@@ -2556,7 +2553,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if ((activeAppRef.current === AppID.Call && activeCharIdScheduleRef.current === charId)
               || suspendedCallRef.current?.charId === charId) {
               drainQueuedProactive();
-              console.log(`🔕 [Proactive/Global] Skipped for ${char.name}: 正在通话 (CallApp active)`);
               return;
           }
 
@@ -2571,7 +2567,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
           proactiveRunningRef.current = true;
           setProactiveComposingChars(prev => prev[charId] ? prev : { ...prev, [charId]: true });
-          console.log(`🔔 [Proactive/Global] Trigger fired for ${char.name}${useSecondary ? ' (副API)' : ''}`);
 
           try {
               // 1. Calculate time gap
