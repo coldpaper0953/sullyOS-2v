@@ -40,6 +40,12 @@ const CloudSyncSettings: React.FC = () => {
     const [session, setSession] = useState(() => loadCloudSyncSession());
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
+    // 加密口令：登录/注册时从密码框带入，之后只在 React 内存态（不进 localStorage/sessionStorage）。
+    // 页面刷新后为空 → 上传/恢复前要求重新输入一次（解锁语义，与密码管理器锁屏同思路）。
+    // 自动上传链路读 sessionStorage 的会话级副本（关浏览器即清，不落磁盘）。
+    const [cryptoPassword, setCryptoPassword] = useState(() => {
+        try { return sessionStorage.getItem('os_cloud_sync_pass_v1') || ''; } catch { return ''; }
+    });
     const [mode, setMode] = useState<'login' | 'signup'>('login');
     const [busy, setBusy] = useState<string | null>(null);
     const [status, setStatus] = useState('');
@@ -83,6 +89,10 @@ const CloudSyncSettings: React.FC = () => {
                 ? await cloudSyncSignUp(config, email.trim(), password)
                 : await cloudSyncLogin(config, email.trim(), password);
             setSession(next);
+            setCryptoPassword(password); // 登录口令同场转加密口令（只在内存，不落盘）
+            // 自动上传（页面隐藏时静默 push）需要口令派生密钥——缓存在 sessionStorage：
+            // 刷新页面仍在（同浏览器会话内自动同步连续），关浏览器即清，不写磁盘。
+            try { sessionStorage.setItem('os_cloud_sync_pass_v1', password); } catch { /* 隐私模式等场景静默跳过 */ }
             trackEvent(mode === 'signup' ? '云同步注册' : '云同步登录');
             addToast(mode === 'signup' ? '注册并登录成功' : '登录成功', 'success');
         } catch (e) {
@@ -103,10 +113,11 @@ const CloudSyncSettings: React.FC = () => {
             const zipBlob = await exportSystem('text_only');
             const { rawBytes, gzipBytes } = await cloudSyncPush(config, session, {
                 zipBlob,
+                password: cryptoPassword,
                 onProgress: msg => setStatus(msg),
             });
-            setStatus(`✅ 已上传：原始 ${fmtBytes(rawBytes)} → gzip 后 ${fmtBytes(gzipBytes)}`);
-            addToast('云端备份已更新', 'success');
+            setStatus(`✅ 已加密上传：原始 ${fmtBytes(rawBytes)} → 密文 gzip 后 ${fmtBytes(gzipBytes)}`);
+            addToast('云端备份已更新（端到端加密）', 'success');
             const meta = await cloudSyncPeek(config, session).catch(() => null);
             setRemote(meta);
         } catch (e) {
@@ -123,10 +134,10 @@ const CloudSyncSettings: React.FC = () => {
         setStatus('');
         try {
             trackEvent('云同步恢复');
-            const zipBlob = await cloudSyncPull(config, session, msg => setStatus(msg));
+            const zipBlob = await cloudSyncPull(config, session, cryptoPassword, msg => setStatus(msg));
             // 走与手动导入 zip 完全相同的管道（含分片校验与进度 UI）
             await importSystem(new File([zipBlob], 'sully_cloud_sync.zip', { type: 'application/zip' }));
-            setStatus('✅ 已从云端恢复，刷新后生效');
+            setStatus('✅ 已解密并从云端恢复，刷新后生效');
             addToast('云端数据已恢复', 'success');
         } catch (e) {
             setStatus(`❌ ${e instanceof Error ? e.message : '恢复失败'}`);
@@ -139,6 +150,8 @@ const CloudSyncSettings: React.FC = () => {
         cloudSyncLogout();
         setSession(null);
         setRemote(null);
+        setCryptoPassword('');
+        try { sessionStorage.removeItem('os_cloud_sync_pass_v1'); } catch { /* ignore */ }
         addToast('已退出云同步账号（云端数据保留）', 'info');
     };
 
@@ -242,12 +255,39 @@ const CloudSyncSettings: React.FC = () => {
                             <div className="flex justify-between"><span className="text-slate-400">云端备份</span><span className="font-bold">{remote ? `${fmtBytes(remote.gzipBytes)} · ${fmtTime(remote.pushedAt)}` : '还没有'}</span></div>
                             {remote?.deviceLabel && <div className="flex justify-between gap-3"><span className="text-slate-400 shrink-0">最后上传设备</span><span className="truncate font-mono text-slate-500">{remote.deviceLabel}</span></div>}
                         </div>
+                        {session && !cryptoPassword && (
+                            <div className="rounded-2xl border border-amber-100 bg-amber-50/70 p-3 space-y-2">
+                                <p className="text-[10px] text-amber-600 leading-relaxed">
+                                    🔒 备份采用端到端加密（AES-256-GCM，密钥由你的账号密码在浏览器内派生），口令不落盘、页面刷新后即锁定。请重新输入一次账号密码解锁上传/恢复：
+                                </p>
+                                <div className="flex gap-2">
+                                    <input
+                                        type="password"
+                                        value={password}
+                                        onChange={e => setPassword(e.target.value)}
+                                        placeholder="账号密码（解锁加密）"
+                                        className="flex-1 bg-white border border-amber-200 rounded-xl px-3 py-2 text-[11px] outline-none focus:border-amber-400"
+                                    />
+                                    <button
+                                        onClick={() => {
+                                            if (!password) { addToast('请输入账号密码', 'error'); return; }
+                                            setCryptoPassword(password);
+                                            try { sessionStorage.setItem('os_cloud_sync_pass_v1', password); } catch { /* ignore */ }
+                                            addToast('已解锁端到端加密', 'success');
+                                        }}
+                                        className="px-4 py-2 rounded-xl text-[11px] font-bold bg-amber-400 text-white shadow-sm active:scale-95 transition-all"
+                                    >
+                                        解锁
+                                    </button>
+                                </div>
+                            </div>
+                        )}
                         <div className="flex gap-2">
-                            <button onClick={handlePush} disabled={busy === 'push'} className="flex-1 py-2.5 rounded-xl text-xs font-bold bg-violet-500 text-white shadow-sm shadow-violet-200 active:scale-95 transition-all disabled:opacity-50">
-                                {busy === 'push' ? '上传中…' : '⬆ 立即上传本机数据'}
+                            <button onClick={handlePush} disabled={busy === 'push' || !cryptoPassword} className="flex-1 py-2.5 rounded-xl text-xs font-bold bg-violet-500 text-white shadow-sm shadow-violet-200 active:scale-95 transition-all disabled:opacity-50">
+                                {busy === 'push' ? '加密上传中…' : '⬆ 加密上传本机数据'}
                             </button>
-                            <button onClick={handlePull} disabled={busy === 'pull'} className="flex-1 py-2.5 rounded-xl text-xs font-bold bg-white border border-violet-200 text-violet-600 hover:bg-violet-50 active:scale-95 transition-all disabled:opacity-50">
-                                {busy === 'pull' ? '恢复中…' : '⬇ 从云端恢复到本机'}
+                            <button onClick={handlePull} disabled={busy === 'pull' || !cryptoPassword} className="flex-1 py-2.5 rounded-xl text-xs font-bold bg-white border border-violet-200 text-violet-600 hover:bg-violet-50 active:scale-95 transition-all disabled:opacity-50">
+                                {busy === 'pull' ? '解密恢复中…' : '⬇ 解密恢复到本机'}
                             </button>
                         </div>
                         <button onClick={handleLogout} className="w-full py-2 rounded-xl text-[11px] font-bold text-slate-400 hover:text-slate-600 transition-colors">退出登录（云端数据保留）</button>
@@ -258,7 +298,7 @@ const CloudSyncSettings: React.FC = () => {
                     <p className="text-[11px] text-slate-500 leading-relaxed px-3 py-2 rounded-xl bg-slate-50 break-words">{status}</p>
                 )}
                 <p className="text-[10px] text-slate-400 leading-relaxed">
-                    上传内容 = 「设置 → 导出备份」的文本档（含 API 配置与全部设置；图片视频等媒体不入云，恢复后由本机相册/媒体库对应）。免费套餐 500MB 对个人足够：gzip 压缩后通常仅几 MB；接近上限会提前提醒。心跳每 30 分钟自动打点，防止免费项目 7 天无活动被暂停。
+                    上传内容 = 「设置 → 导出备份」的文本档（含 API 配置与全部设置；图片视频等媒体不入云，恢复后由本机相册/媒体库对应），整包经你的账号密码派生密钥（PBKDF2·21 万次）做 AES-256-GCM 端到端加密后才离开浏览器——数据库被拖库也只见密文，Supabase 与本站代码里都没有明文密钥。免费套餐 500MB 对个人足够；接近上限会提前提醒。心跳每 30 分钟自动打点，防止免费项目 7 天无活动被暂停。
                 </p>
             </div>}
         </section>

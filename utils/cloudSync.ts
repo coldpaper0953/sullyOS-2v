@@ -305,6 +305,86 @@ async function gunzipB64ToBytes(gzipB64: string): Promise<Uint8Array> {
     return new Uint8Array(out.buffer, out.byteOffset, out.byteLength);
 }
 
+// ─── 端到端加密（密码派生密钥 → AES-256-GCM 整包）─────────────────
+//
+// 威胁模型：攻击者拿到 Supabase 数据库内容（SQL 注入 / 服务商被拖库 / RLS 失守）
+// 时，也读不出任何 API key 与聊天数据。密钥由用户密码 + 随机盐在浏览器里
+// PBKDF2 派生，密码本身不上传、不落 localStorage、不进 session——登录
+// fetch 一发完就只剩派生密钥在内存里，页面关掉即消失。
+//
+// 云端落库的是「密文信封」：盐 + GCM IV + 密文，全 base64。解密只需要
+// 同一个密码。密码错 → GCM 校验位不匹配 → 直接报「密码不匹配」，
+// 不会解出半截脏数据。
+
+const PBKDF2_ITERATIONS = 210_000;
+const MAGIC = 'SULLYE2E1'; // 信封版本号：将来升级算法时旧信封仍可识别
+
+interface CipherEnvelope {
+    magic: string;
+    salt: string;  // base64
+    iv: string;    // base64
+    ct: string;    // base64（AES-256-GCM 密文 + 校验位）
+}
+
+async function deriveKey(password: string, saltBytes: Uint8Array): Promise<CryptoKey> {
+    const enc = new TextEncoder();
+    const baseKey = await crypto.subtle.importKey('raw', enc.encode(password) as unknown as BufferSource, 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt: saltBytes as unknown as BufferSource, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
+        baseKey,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt'],
+    );
+}
+
+function bytesToB64(bytes: Uint8Array): string {
+    let binary = '';
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + CHUNK, bytes.length)));
+    }
+    return btoa(binary);
+}
+
+function b64ToBytes(b64: string): Uint8Array {
+    const binary = atob(b64);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+}
+
+/** 整包加密：zip Blob → 密文信封（对象，可直接 JSON 序列化落库）。 */
+async function encryptBlob(password: string, blob: Blob): Promise<CipherEnvelope> {
+    const saltBytes = crypto.getRandomValues(new Uint8Array(16));
+    const ivBytes = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveKey(password, saltBytes);
+    const plain = new Uint8Array(await blob.arrayBuffer());
+    const ct = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv: ivBytes as unknown as BufferSource },
+        key,
+        plain as unknown as BufferSource,
+    );
+    return { magic: MAGIC, salt: bytesToB64(saltBytes), iv: bytesToB64(ivBytes), ct: bytesToB64(new Uint8Array(ct)) };
+}
+
+/** 信封解密回 zip Blob。密码不对时 GCM 校验失败，抛「密码不匹配」。 */
+async function decryptEnvelope(password: string, env: CipherEnvelope): Promise<Blob> {
+    if (env?.magic !== MAGIC) throw new Error('云端备份不是加密格式（可能是旧版未加密数据），请用旧版本拉回后重新上传');
+    const key = await deriveKey(password, b64ToBytes(env.salt));
+    let plain: ArrayBuffer;
+    try {
+        plain = await crypto.subtle.decrypt(
+            { name: 'AES-GCM', iv: b64ToBytes(env.iv) as unknown as BufferSource },
+            key,
+            b64ToBytes(env.ct) as unknown as BufferSource,
+        );
+    } catch {
+        throw new Error('密码不匹配，无法解密云端备份');
+    }
+    return new Blob([plain], { type: 'application/zip' });
+}
+
 // ─── 上传 / 恢复 ──────────────────────────────────────────────────
 
 /**
@@ -319,19 +399,27 @@ export interface PushOptions {
     zipBlob: Blob;
     deviceLabel?: string;
     onProgress?: (msg: string) => void;
+    /** 端到端加密口令（= 账号密码）。不传则拒绝上传——明文备份不允许落库。 */
+    password: string;
 }
 
 export async function cloudSyncPush(config: CloudSyncConfig, sessionIn: CloudSyncSession, opts: PushOptions): Promise<{ rawBytes: number; gzipBytes: number }> {
     assertConfig(config);
+    if (!opts.password) throw new Error('缺少加密口令：云端备份必须加密后上传');
     const session = await cloudSyncRefresh(config, sessionIn);
     if (!session) throw new CloudSyncApiError('登录已过期，请重新登录', 401);
 
-    opts.onProgress?.('正在 gzip 压缩备份包…');
-    const { gzipB64, gzipBytes } = await gzipBytesToB64(opts.zipBlob);
+    opts.onProgress?.('正在端到端加密备份包…');
+    const envelope = await encryptBlob(opts.password, opts.zipBlob);
+    // 密封信封再 gzip（密文高熵压不动，但 metadata 可压）——信封尺寸 ≈ 明文 + 16B GCM 标签。
+    const envelopeBlob = new Blob([JSON.stringify(envelope)], { type: 'application/json' });
+
+    opts.onProgress?.('正在 gzip 压缩…');
+    const { gzipB64, gzipBytes } = await gzipBytesToB64(envelopeBlob);
     const rawBytes = opts.zipBlob.size;
     if (gzipBytes > QUOTA_WARN_BYTES) {
         throw new Error(
-            `压缩后仍有 ${(gzipBytes / 1024 / 1024).toFixed(1)}MB，接近免费套餐 500MB 上限。` +
+            `加密压缩后仍有 ${(gzipBytes / 1024 / 1024).toFixed(1)}MB，接近免费套餐 500MB 上限。` +
             '建议先在「设置 → 数据管理」里清理旧媒体的聊天记录/相册再同步，或升级 Supabase 套餐。'
         );
     }
@@ -387,9 +475,10 @@ export async function cloudSyncPeek(config: CloudSyncConfig, sessionIn: CloudSyn
     };
 }
 
-/** 拉取并解压云端备份 zip（不写入本地——写入由调用方按需确认后走 importSystem，与手动导入同一管道）。 */
-export async function cloudSyncPull(config: CloudSyncConfig, sessionIn: CloudSyncSession, onProgress?: (msg: string) => void): Promise<Blob> {
+/** 拉取并解压解密云端备份 zip（不写入本地——写入由调用方按需确认后走 importSystem，与手动导入同一管道）。 */
+export async function cloudSyncPull(config: CloudSyncConfig, sessionIn: CloudSyncSession, password: string, onProgress?: (msg: string) => void): Promise<Blob> {
     assertConfig(config);
+    if (!password) throw new Error('缺少解密口令');
     const session = await cloudSyncRefresh(config, sessionIn);
     if (!session) throw new CloudSyncApiError('登录已过期，请重新登录', 401);
     onProgress?.('正在下载云端备份…');
@@ -403,8 +492,11 @@ export async function cloudSyncPull(config: CloudSyncConfig, sessionIn: CloudSyn
     }
     onProgress?.('正在解压…');
     const bytes = await gunzipB64ToBytes(rows[0].gzip_b64);
-    onProgress?.('解压完成');
-    return new Blob([bytes as unknown as BlobPart], { type: 'application/zip' });
+    onProgress?.('正在解密…');
+    const envelope = JSON.parse(new TextDecoder().decode(bytes)) as CipherEnvelope;
+    const zipBlob = await decryptEnvelope(password, envelope);
+    onProgress?.('解密完成');
+    return zipBlob;
 }
 
 /** 登录用户的 localStorage 设置快照（MIRRORED_KEYS 同批：API 配置等小设置）。 */

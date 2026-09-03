@@ -1123,13 +1123,17 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   // autoSync 开 + 已登录：页面隐藏（切走/最小化/关机前 pagehide）时把本机数据
   // 静默推到用户自己的 Supabase。失败只 console.warn——自动链路不打扰用户，
   // 手动上传入口在 设置 → 云端账号同步。push 与手动按钮同一条 exportSystem 管道。
+  // 端到端加密：push 需要账号密码派生密钥。密码不能持久化，登录后缓存在
+  // sessionStorage（浏览器会话级——关浏览器即清，不落磁盘），刷新页面仍在；
+  // 没解锁时自动链路跳过（设置面板里手动输入一次即可恢复自动加密上传）。
   const cloudAutoSyncReady = () => {
       try {
           const cfgRaw = localStorage.getItem('os_cloud_sync_config_v1');
           const sessRaw = localStorage.getItem('os_cloud_sync_session_v1');
           const cfg = cfgRaw ? JSON.parse(cfgRaw) : null;
           const sess = sessRaw ? JSON.parse(sessRaw) : null;
-          return Boolean(cfg?.autoSync && sess?.accessToken && cfg?.supabaseUrl && cfg?.supabaseAnonKey);
+          const unlocked = Boolean(sessionStorage.getItem('os_cloud_sync_pass_v1'));
+          return Boolean(unlocked && cfg?.autoSync && sess?.accessToken && cfg?.supabaseUrl && cfg?.supabaseAnonKey);
       } catch { return false; }
   };
   const cloudAutoSyncRef = useRef(false);
@@ -1146,10 +1150,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   const cfg = loadCloudSyncConfig();
                   const session = loadCloudSyncSession();
                   if (!cfg.autoSync || !session || !cfg.supabaseUrl || !cfg.supabaseAnonKey) return;
+                  const password = sessionStorage.getItem('os_cloud_sync_pass_v1') || '';
+                  if (!password) return;
                   const exportFn = cloudAutoSyncExportRef.current;
                   if (!exportFn) return;
                   const zipBlob = await exportFn();
-                  await cloudSyncPush(cfg, session, { zipBlob, deviceLabel: 'auto-sync' });
+                  await cloudSyncPush(cfg, session, { zipBlob, password, deviceLabel: 'auto-sync' });
               } catch (e) {
                   console.warn('[云同步] 自动上传失败（不影响本地数据）：', e);
               } finally {
