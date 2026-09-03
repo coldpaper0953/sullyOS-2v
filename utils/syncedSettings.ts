@@ -192,6 +192,34 @@ export async function flushSyncedSettings(): Promise<number> {
     }
 }
 
+/**
+ * 首轮播种：云端没有某个键、而本机有值，就把本机这份推上去。
+ *
+ * 没有这一步的话，新表会一直是空的——只有用户主动改过某项设置才会产生行，
+ * 其他设备刷新永远拉不到东西（用户报的「其他浏览器没同步上」就是这个）。
+ * 只补云端缺的键，已存在的行一律不动（那可能是别的设备刚写的、更新的值）。
+ */
+export async function seedSyncedSettings(): Promise<number> {
+    const ctx = resolveCtx?.();
+    if (!ctx) return 0;
+    try {
+        const res = await fetch(`${restBase(ctx.config)}?select=key`, { headers: headers(ctx.config, ctx.session) });
+        if (!res.ok) return 0;
+        const have = new Set((await res.json() as Array<{ key: string }>).map(r => r.key));
+        let queued = 0;
+        for (const { key } of SYNCED_SETTING_KEYS) {
+            if (have.has(key)) continue;
+            if (localStorage.getItem(key) == null) continue;
+            dirty.add(key);
+            queued++;
+        }
+        if (queued === 0) return 0;
+        return await flushSyncedSettings();
+    } catch {
+        return 0;
+    }
+}
+
 /** 删除一个设置键（本地已删，云端也要删，否则下次开机又被拉回来）。 */
 export async function deleteSyncedSetting(key: string): Promise<void> {
     if (!ALL_KEYS.has(key)) return;

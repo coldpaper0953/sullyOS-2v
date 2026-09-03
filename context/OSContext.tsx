@@ -1317,19 +1317,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               const cfg = loadCloudSyncConfig();
               const session = loadCloudSyncSession();
               if (!cfg.autoSync || !session?.accessToken) return;
-              // 逐键设置同步（sully_settings 表）：整包同步会因为「这次的包没带全」把云端已经
-              // 同步好的字段一起抹掉（实测 9 项只剩 5 项，预设/模型列表全丢）。这一层一个键
-              // 一行，只可能覆盖确实写了的键。先拉它，再走下面的整包密钥逻辑。
-              try {
-                  const { bindSyncedSettingsContext, pullSyncedSettings } = await import('../utils/syncedSettings');
-                  const { resolveSecretKey } = await import('../utils/cloudSync');
-                  const settingsKey = await resolveSecretKey(session.userId).catch(() => null);
-                  bindSyncedSettingsContext(() => ({ config: cfg, session, key: settingsKey }));
-                  const applied = await pullSyncedSettings();
-                  if (applied > 0) console.debug('[settings-sync] 从云端取回', applied, '项设置');
-              } catch (e) {
-                  console.warn('[settings-sync] 拉取失败（不影响本地使用）', e);
-              }
+              const { resolveSecretKey } = await import('../utils/cloudSync');
+              const settingsKey = await resolveSecretKey(session.userId).catch(() => null);
+
+              // ── 第一层（旧）：整包密钥同步。里面的 return 只能退出这一层，
+              //    否则下面的逐键同步会被一起跳过。 ──
+              await (async () => {
               const cloudAt = await cloudSyncPeekSecrets(cfg, session);
               const seenAt = Number(localStorage.getItem('os_cloud_secrets_seen_v1') || '0');
               // 时间戳没变通常就不用动，但有一种情况必须无条件补一次：本机一个凭据都没有
@@ -1365,6 +1358,25 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               // 会在以后某次启动被当成「本机丢了设置」回填回来，把云端这份顶掉。
               void import('../utils/lsMirror').then(m => m.snapshotLocalStorageMirror()).catch(() => {});
               if (secrets.apiConfig?.apiKey) cloudPullToastRef.current('已同步云端的 API 配置', 'success');
+              })().catch(e => console.warn('[云同步] 整包 API 配置同步失败（不影响本地）：', e));
+
+              // ── 第二层（新）：逐键设置同步（sully_settings）。
+              //    放在整包**之后**，让它当权威——整包会因为「这次的包没带全」把字段抹掉
+              //    （实测 9 项只剩 5 项），逐键这层一个键一行、只覆盖确实写了的键。
+              //    首轮还要 seed：云端没有这个键但本机有，就把本机这份推上去，
+              //    否则表一直是空的、别的设备永远拉不到东西。 ──
+              try {
+                  const { bindSyncedSettingsContext, pullSyncedSettings, seedSyncedSettings } = await import('../utils/syncedSettings');
+                  bindSyncedSettingsContext(() => ({ config: cfg, session, key: settingsKey }));
+                  const applied = await pullSyncedSettings();
+                  const seeded = await seedSyncedSettings();
+                  if (applied || seeded) console.debug('[settings-sync] 拉回', applied, '项 / 首传', seeded, '项');
+                  if (applied > 0) {
+                      void import('../utils/lsMirror').then(m => m.snapshotLocalStorageMirror()).catch(() => {});
+                  }
+              } catch (e) {
+                  console.warn('[settings-sync] 逐键同步失败（不影响本地使用）', e);
+              }
           } catch (e) {
               console.warn('[云同步] API 配置同步失败（不影响本地）：', e);
           }
