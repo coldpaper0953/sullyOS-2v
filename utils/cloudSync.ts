@@ -132,17 +132,19 @@ export function loadCloudSyncConfig(): CloudSyncConfig {
         const raw = localStorage.getItem(LS_CONFIG);
         if (!raw) {
             // 没有历史配置 → 直接用内置官方服务器（anon key 是发布键，
-            // 设计上就随前端分发，不算秘密；数据行仍只允许登录用户本人读写）
-            return { ...BUILTIN_CLOUD, autoSync: false };
+            // 设计上就随前端分发，不算秘密；数据行仍只允许登录用户本人读写）。
+            // autoSync 默认开：用户要的是「点开就是上次的状态」，不该再手动开开关。
+            return { ...BUILTIN_CLOUD, autoSync: true };
         }
         const parsed = JSON.parse(raw) as Partial<CloudSyncConfig>;
         return {
             supabaseUrl: (parsed.supabaseUrl || BUILTIN_CLOUD.supabaseUrl).trim(),
             supabaseAnonKey: (parsed.supabaseAnonKey || BUILTIN_CLOUD.supabaseAnonKey).trim(),
-            autoSync: parsed.autoSync === true,
+            // 老配置里没有这个字段（undefined）时按开处理；只有显式关过才是 false
+            autoSync: parsed.autoSync !== false,
         };
     } catch {
-        return { ...BUILTIN_CLOUD, autoSync: false };
+        return { ...BUILTIN_CLOUD, autoSync: true };
     }
 }
 
@@ -381,19 +383,8 @@ function b64ToBytes(b64: string): Uint8Array {
     return out;
 }
 
-/** 整包加密：zip Blob → 密文信封（对象，可直接 JSON 序列化落库）。 */
-async function encryptBlob(password: string, blob: Blob): Promise<CipherEnvelope> {
-    const saltBytes = crypto.getRandomValues(new Uint8Array(16));
-    const ivBytes = crypto.getRandomValues(new Uint8Array(12));
-    const key = await deriveKey(password, saltBytes);
-    const plain = new Uint8Array(await blob.arrayBuffer());
-    const ct = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv: ivBytes as unknown as BufferSource },
-        key,
-        plain as unknown as BufferSource,
-    );
-    return { magic: MAGIC, salt: bytesToB64(saltBytes), iv: bytesToB64(ivBytes), ct: bytesToB64(new Uint8Array(ct)) };
-}
+/** v1 兼容：旧版整包密文信封的解密路径（deriveKey/decryptEnvelope）仍保留，
+ *  但不再有任何地方写入 v1 整包信封——新推送一律是「明文数据包 + v3 密钥信封」。 */
 
 /** 信封解密回 zip Blob。密码不对时 GCM 校验失败，抛「密码不匹配」。 */
 async function decryptEnvelope(password: string, env: CipherEnvelope): Promise<Blob> {
@@ -410,6 +401,107 @@ async function decryptEnvelope(password: string, env: CipherEnvelope): Promise<B
         throw new Error('密码不匹配，无法解密云端备份');
     }
     return new Blob([plain], { type: 'application/zip' });
+}
+
+// ─── 密钥信封 v3：可复用的派生密钥（登录一次，之后每次打开自动解密）────
+//
+// v2 的问题：盐每次随机 → 派生密钥不能复用 → 每次刷新都得重输密码换算一次。
+// 用户要的是「点开就是上次的状态，不用导入、不用输密码」，所以改成：
+//   盐 = SHA-256(userId + 固定 pepper)（确定性，盐本来也不需要保密，
+//   它的作用只是让同密码在不同账号下派生出不同密钥、挡彩虹表）
+//   → 同一账号同一密码永远派生出同一把密钥
+//   → 派生出来的 CryptoKey 以 **extractable:false** 存进本机 IndexedDB：
+//     页面里能用它解密，但 JS 读不出密钥字节，密码本身依然不落任何存储。
+// 云端仍只有密文（数据库被拖库读不出 API key）；本机被物理接触的场景下
+// API key 本来就在 localStorage 里，存这把钥匙不额外降低安全性。
+const SECRET_MAGIC = 'SULLYSEC3';
+const SALT_PEPPER = 'sullyos-cloud-secrets-v3';
+const LS_KEY_ASSET = 'cloud_secret_key_v3';
+
+interface SecretEnvelope {
+    magic: string;
+    iv: string;
+    ct: string;
+}
+
+async function deterministicSalt(userId: string): Promise<Uint8Array> {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(userId + SALT_PEPPER) as unknown as BufferSource);
+    return new Uint8Array(digest);
+}
+
+/** 由账号密码 + 账号 id 派生可复用的密钥（不可导出）。 */
+async function deriveReusableKey(password: string, userId: string): Promise<CryptoKey> {
+    const enc = new TextEncoder();
+    const baseKey = await crypto.subtle.importKey('raw', enc.encode(password) as unknown as BufferSource, 'PBKDF2', false, ['deriveKey']);
+    const salt = await deterministicSalt(userId);
+    return crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt: salt as unknown as BufferSource, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
+        baseKey,
+        { name: 'AES-GCM', length: 256 },
+        false, // extractable:false —— 存进 IndexedDB 后 JS 也读不出密钥字节
+        ['encrypt', 'decrypt'],
+    );
+}
+
+/**
+ * 拿到本账号可用的密钥：给了密码就派生并记住（登录/换密码时），
+ * 没给就取本机记住的那把（平时打开页面走这条，全程无感）。
+ * 都没有 → null（云端密钥这次拿不到，数据同步不受影响）。
+ */
+export async function resolveSecretKey(userId: string, password?: string): Promise<CryptoKey | null> {
+    if (!userId) return null;
+    if (password) {
+        const key = await deriveReusableKey(password, userId);
+        try {
+            const { DB } = await import('./db');
+            await DB.saveAssetRaw(LS_KEY_ASSET, { userId, key, savedAt: Date.now() });
+        } catch { /* 存不下不影响本次使用 */ }
+        return key;
+    }
+    try {
+        const { DB } = await import('./db');
+        const saved = await DB.getAssetRaw(LS_KEY_ASSET);
+        if (saved?.userId === userId && saved.key instanceof CryptoKey) return saved.key;
+    } catch { /* ignore */ }
+    return null;
+}
+
+/** 忘掉本机记住的密钥（退出登录时调用）。 */
+export async function forgetSecretKey(): Promise<void> {
+    try {
+        const { DB } = await import('./db');
+        await DB.deleteAsset(LS_KEY_ASSET);
+    } catch { /* ignore */ }
+}
+
+async function encryptSecrets(key: CryptoKey, json: string): Promise<SecretEnvelope> {
+    const ivBytes = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv: ivBytes as unknown as BufferSource },
+        key,
+        new TextEncoder().encode(json) as unknown as BufferSource,
+    );
+    return { magic: SECRET_MAGIC, iv: bytesToB64(ivBytes), ct: bytesToB64(new Uint8Array(ct)) };
+}
+
+/** 解密密钥信封。兼容 v2 旧信封（自带随机盐，必须有密码才能解）。 */
+async function decryptSecrets(env: any, key: CryptoKey | null, password?: string): Promise<string> {
+    if (env?.magic === SECRET_MAGIC) {
+        if (!key) throw new Error('本机还没有解密钥匙');
+        const plain = await crypto.subtle.decrypt(
+            { name: 'AES-GCM', iv: b64ToBytes(env.iv) as unknown as BufferSource },
+            key,
+            b64ToBytes(env.ct) as unknown as BufferSource,
+        );
+        return new TextDecoder().decode(plain);
+    }
+    // v2 旧信封（magic SULLYE2E1 + 随机盐）：有密码就解，之后的推送会自动升级成 v3
+    if (env?.magic === MAGIC) {
+        if (!password) throw new Error('云端密钥是旧格式，需要账号密码升级一次');
+        const blob = await decryptEnvelope(password, env as CipherEnvelope);
+        return blob.text();
+    }
+    throw new Error('云端密钥格式无法识别');
 }
 
 // ─── 上传 / 恢复 ──────────────────────────────────────────────────
@@ -429,11 +521,11 @@ export interface PushOptions {
     deviceLabel?: string;
     onProgress?: (msg: string) => void;
     /**
-     * 敏感字段加密口令（= 账号密码）。不传/为空 = 跳过密钥上传（明文数据照常推）。
-     * v2 架构：普通数据（角色/聊天/设置）明文同步（RLS 行级隔离，只有本人可读），
-     * 只有 API 密钥这批敏感字段必须加密后另存一张表。
+     * 敏感字段的加密密钥（resolveSecretKey 拿到的可复用密钥）。没有 = 跳过密钥上传
+     * （明文数据照常推）。v3 架构：普通数据（角色/聊天/设置）明文同步（RLS 行级隔离，
+     * 只有本人可读），只有 API 密钥这批敏感字段加密后另存一张表。
      */
-    password?: string;
+    secretKey?: CryptoKey | null;
 }
 
 /**
@@ -487,9 +579,9 @@ export async function cloudSyncPush(config: CloudSyncConfig, sessionIn: CloudSyn
     // 本机推送水位：开机自动拉新时与云端 pushed_at 对比，云端不比这个新就不动本地
     // （本机就是最后推的设备 → 拉回来只会拿到自己的数据，白白覆盖一次运行态）。
     try { localStorage.setItem('os_cloud_sync_last_push_v1', String(Date.now())); } catch { /* ignore */ }
-    if (opts.secretsJson && opts.password) {
+    if (opts.secretsJson && opts.secretKey) {
         opts.onProgress?.('正在加密 API 密钥…');
-        const envelope = await encryptBlob(opts.password, new Blob([opts.secretsJson], { type: 'application/json' }));
+        const envelope = await encryptSecrets(opts.secretKey, opts.secretsJson);
         const secRes = await fetch(`${baseUrl(config)}/rest/v1/sully_api_secrets`, {
             method: 'POST',
             headers: { ...authHeaders(config, session), Prefer: 'resolution=merge-duplicates' },
@@ -551,13 +643,16 @@ export async function cloudSyncPull(config: CloudSyncConfig, sessionIn: CloudSyn
     if (!session) throw new CloudSyncApiError('登录已过期，请重新登录', 401);
     onProgress?.('正在下载云端备份…');
     const res = await fetch(
-        `${baseUrl(config)}/rest/v1/sully_user_data?select=gzip_b64,snapshot_version&user_id=eq.${encodeURIComponent(session.userId)}&limit=1`,
+        `${baseUrl(config)}/rest/v1/sully_user_data?select=gzip_b64,snapshot_version,pushed_at&user_id=eq.${encodeURIComponent(session.userId)}&limit=1`,
         { headers: authHeaders(config, session) },
     );
     const rows = await jsonOrThrow(res, '下载失败');
     if (!Array.isArray(rows) || rows.length === 0 || !rows[0]?.gzip_b64) {
-        throw new Error('云端还没有备份。先在本机点「立即上传」推一份。');
+        throw new Error('云端还没有数据。先在本机点「立刻上传」推一份。');
     }
+    // 本机水位对齐到刚拉下来的这一版：不然开机自动拉新会认为「云端还比本机新」，
+    // 每次启动都重复拉一遍同样的数据。
+    try { localStorage.setItem('os_cloud_sync_last_push_v1', String(Number(rows[0].pushed_at) || Date.now())); } catch { /* ignore */ }
     onProgress?.('正在解压…');
     const bytes = await gunzipB64ToBytes(rows[0].gzip_b64);
     // v2 明文：字节就是 zip 本身；v1 旧整包：字节是 CipherEnvelope JSON，需密码解密
@@ -575,18 +670,21 @@ export async function cloudSyncPull(config: CloudSyncConfig, sessionIn: CloudSyn
 }
 
 /**
- * 拉取敏感字段（API 密钥）明文 JSON。云端没推过密钥 → null；
- * 密码错误/未提供 → secretsLocked 不抛错（数据主包已可用）。
+ * 拉取敏感字段（API 密钥）明文 JSON。
+ * 平时不用传密码：本机记住的密钥（登录时派生、extractable:false 存 IndexedDB）够用，
+ * 所以每次打开页面都能自动把云端密钥解出来。换设备第一次登录时传密码派生并记住。
+ * 云端没推过密钥 → null；解不开 → locked:true（数据主包不受影响，不抛错）。
  */
 export async function cloudSyncPullSecrets(
     config: CloudSyncConfig,
     sessionIn: CloudSyncSession,
-    password: string,
+    password?: string,
 ): Promise<{ secretsJson: string | null; locked: boolean }> {
     assertConfig(config);
-    if (!password) return { secretsJson: null, locked: false };
     const session = await cloudSyncRefresh(config, sessionIn);
     if (!session) return { secretsJson: null, locked: false };
+    const key = await resolveSecretKey(session.userId, password);
+    if (!key && !password) return { secretsJson: null, locked: true };
     try {
         const res = await fetch(
             `${baseUrl(config)}/rest/v1/sully_api_secrets?select=envelope&user_id=eq.${encodeURIComponent(session.userId)}&limit=1`,
@@ -594,9 +692,8 @@ export async function cloudSyncPullSecrets(
         );
         const rows = await jsonOrThrow(res, '查询密钥失败');
         if (!Array.isArray(rows) || rows.length === 0 || !rows[0]?.envelope) return { secretsJson: null, locked: false };
-        const envelope = JSON.parse(rows[0].envelope) as CipherEnvelope;
-        const blob = await decryptEnvelope(password, envelope);
-        return { secretsJson: await blob.text(), locked: false };
+        const envelope = JSON.parse(rows[0].envelope);
+        return { secretsJson: await decryptSecrets(envelope, key, password), locked: false };
     } catch {
         // 密码不对/表还没建/网络问题：数据主包不受影响
         return { secretsJson: null, locked: true };

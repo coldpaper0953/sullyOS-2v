@@ -13,23 +13,23 @@ import {
     cloudSyncPullSecrets,
     cloudSyncPush,
     cloudSyncSignUp,
+    forgetSecretKey,
     loadCloudSyncConfig,
     loadCloudSyncSession,
     mergeBackupSecrets,
+    resolveSecretKey,
     saveCloudSyncConfig,
     splitBackupSecrets,
     type CloudSyncConfig,
-    type CloudSyncSession,
 } from '../../utils/cloudSync';
 
 /**
  * 云端账号同步面板（设置页）。
  *
- * GitHub Pages + Supabase 模式：注册/登录账号 → 全量备份（含 API 配置，
- * 与「设置 → 导出备份」同口径的 text_only zip）推到自己的 Supabase；
- * 换设备登录后一键拉回，走手动导入同一条恢复管道。
- * 数据行 RLS 按 auth.uid() 隔离，anon key 拿不到任何人的数据。
- * 与「云端备份（WebDAV/GitHub Releases）」「自主后端」并存。
+ * 目标体验（用户原话）：「把所有数据都存在云端…点开就是之前发的消息，不用再导入信息」。
+ * 邮箱+密码登录一次 → 角色/聊天/设置明文同步（RLS 行级隔离），API 密钥另用
+ * 账号密码派生的可复用密钥加密（密钥不可导出地存在本机 IndexedDB，密码不落盘）
+ * → 之后每次打开都自动拉最新、自动解密，全程零手动步骤。
  */
 
 const fmtBytes = (n: number) => n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)}MB` : `${(n / 1024).toFixed(0)}KB`;
@@ -60,18 +60,21 @@ const CloudSyncSettings: React.FC = () => {
     const [session, setSession] = useState(() => loadCloudSyncSession());
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
-    // 加密口令：登录/注册时从密码框带入，之后只在 React 内存态（不进 localStorage/sessionStorage）。
-    // 页面刷新后为空 → 上传/恢复前要求重新输入一次（解锁语义，与密码管理器锁屏同思路）。
-    // 自动上传链路读 sessionStorage 的会话级副本（关浏览器即清，不落磁盘）。
-    const [cryptoPassword, setCryptoPassword] = useState(() => {
-        try { return sessionStorage.getItem('os_cloud_sync_pass_v1') || ''; } catch { return ''; }
-    });
     const [mode, setMode] = useState<'login' | 'signup'>('login');
     const [busy, setBusy] = useState<string | null>(null);
     const [status, setStatus] = useState('');
     const [probe, setProbe] = useState<{ ok: boolean; message: string } | null>(null);
     const [remote, setRemote] = useState<{ rawBytes: number; gzipBytes: number; deviceLabel: string; pushedAt: number } | null>(null);
     const [showSql, setShowSql] = useState(false);
+    // 本机是否已有解密钥匙（登录时派生、不可导出地存在 IndexedDB）。有 = 平时全自动，
+    // 不需要任何密码；没有（老用户第一次升级 / 清过数据）= 提示登录一次即可。
+    const [keyReady, setKeyReady] = useState(false);
+    useEffect(() => {
+        if (!session?.userId) { setKeyReady(false); return; }
+        let cancelled = false;
+        void resolveSecretKey(session.userId).then(k => { if (!cancelled) setKeyReady(Boolean(k)); });
+        return () => { cancelled = true; };
+    }, [session?.userId]);
 
     const persistConfig = (next: CloudSyncConfig) => {
         setConfig(next);
@@ -109,43 +112,42 @@ const CloudSyncSettings: React.FC = () => {
                 ? await cloudSyncSignUp(config, email.trim(), password)
                 : await cloudSyncLogin(config, email.trim(), password);
             setSession(next);
-            setCryptoPassword(password); // 登录口令同场转加密口令（只在内存，不落盘）
-            // API 密钥加密用。缓存在 sessionStorage：刷新页面仍在（同浏览器会话内
-            // 自动同步连续），关浏览器即清，不写磁盘。
-            try { sessionStorage.setItem('os_cloud_sync_pass_v1', password); } catch { /* 隐私模式等场景静默跳过 */ }
+            // 登录密码 → 派生可复用密钥（不可导出，存本机 IndexedDB）：
+            // 之后每次打开页面都能自动解开云端的 API 密钥，不用再输密码。
+            // 密码本身不落任何存储。
+            const secretKey = await resolveSecretKey(next.userId, password);
+            setKeyReady(Boolean(secretKey));
+            // 自动同步默认开——用户要的是「点开就是上次的状态」
+            const cfg = persistConfig({ ...config, autoSync: true });
             trackEvent(mode === 'signup' ? '云同步注册' : '云同步登录');
             addToast(mode === 'signup' ? '注册并登录成功' : '登录成功', 'success');
 
-            // —— 登录即同步（无感）：换设备登录进来数据就在，没有手动上传/恢复步骤 ——
-            // 本地没有角色（新设备/新浏览器）→ 自动把云端数据拉回来；
-            // 本地已有数据 → 本机就是最新，直接推上去完成首次备份。
+            // —— 登录即同步（无感）：云端比本机新就把云端的全部数据（含 API 密钥）拉回来 ——
             setBusy('sync');
             void (async () => {
                 try {
-                    const meta = await cloudSyncPeek(config, next).catch(() => null);
-                    const localEmpty = characters.length === 0;
-                    if (meta && localEmpty) {
-                        setStatus('检测到新设备：正在从云端同步数据…');
-                        // v2：明文数据包免密拉取；API 密钥（加密存）用刚输入的密码解密合并
-                        const dataZip = await cloudSyncPull(config, next, password, msg => setStatus(msg));
+                    const meta = await cloudSyncPeek(cfg, next).catch(() => null);
+                    const lastLocalSync = Number(localStorage.getItem('os_cloud_sync_last_push_v1') || '0');
+                    // 云端有数据且不是本机最后推的那份 → 拉回（换设备/换浏览器都走这条）
+                    if (meta && meta.pushedAt > lastLocalSync) {
+                        setStatus('正在从云端同步你的数据…');
+                        const dataZip = await cloudSyncPull(cfg, next, password, msg => setStatus(msg));
                         let finalZip = dataZip;
-                        try {
-                            const { secretsJson } = await cloudSyncPullSecrets(config, next, password);
-                            if (secretsJson) finalZip = await mergeBackupSecrets(dataZip, secretsJson);
-                        } catch { /* 密钥解不开 → 只恢复数据包，API 配置留本地 */ }
+                        const { secretsJson } = await cloudSyncPullSecrets(cfg, next, password);
+                        if (secretsJson) finalZip = await mergeBackupSecrets(dataZip, secretsJson);
                         await importSystem(new File([finalZip], 'sully_cloud_sync.zip', { type: 'application/zip' }));
-                        addToast('已自动同步云端数据（含 API 配置）', 'success');
-                        setStatus('✅ 云端数据已同步，即将刷新生效');
+                        addToast('云端数据已同步（含 API 配置）', 'success');
+                        setStatus('✅ 数据已回来，即将刷新生效');
                         setTimeout(() => window.location.reload(), 1200);
                         return;
                     }
-                    // 本地有数据 / 云端为空：推一份上去（数据明文 + API 密钥加密）
+                    // 云端为空 / 本机就是最新：推一份上去（数据明文 + API 密钥加密）
                     setStatus('正在备份数据到云端…');
                     const zipBlob = await exportSystem('text_only');
                     const { publicZip, secretsJson } = await splitBackupSecrets(zipBlob);
-                    const { gzipBytes } = await cloudSyncPush(config, next, { zipBlob: publicZip, secretsJson, password, onProgress: msg => setStatus(msg) });
-                    setStatus(`✅ 已同步到云端（${fmtBytes(gzipBytes)}），平时自动同步，无需手动操作`);
-                    const freshMeta = await cloudSyncPeek(config, next).catch(() => null);
+                    const { gzipBytes } = await cloudSyncPush(cfg, next, { zipBlob: publicZip, secretsJson, secretKey, onProgress: msg => setStatus(msg) });
+                    setStatus(`✅ 已同步到云端（${fmtBytes(gzipBytes)}），之后全自动，换设备登录数据自己回来`);
+                    const freshMeta = await cloudSyncPeek(cfg, next).catch(() => null);
                     if (freshMeta) setRemote(freshMeta);
                 } catch (e) {
                     setStatus(`⚠️ 自动同步未完成：${e instanceof Error ? e.message : '未知错误'}（数据仍在本地，可在下方手动重试）`);
@@ -168,14 +170,15 @@ const CloudSyncSettings: React.FC = () => {
             // 与「设置 → 导出备份」完全同口径（text_only 档），敏感字段拆出单独加密上传。
             const zipBlob = await exportSystem('text_only');
             const { publicZip, secretsJson } = await splitBackupSecrets(zipBlob);
+            const secretKey = await resolveSecretKey(session.userId);
             const { rawBytes, gzipBytes } = await cloudSyncPush(config, session, {
                 zipBlob: publicZip,
                 secretsJson,
-                password: cryptoPassword || undefined,
+                secretKey,
                 onProgress: msg => setStatus(msg),
             });
-            setStatus(`✅ 已上传：原始 ${fmtBytes(rawBytes)} → gzip 后 ${fmtBytes(gzipBytes)}${cryptoPassword ? '（API 密钥已加密随行）' : '（未解锁，API 密钥未更新）'}`);
-            addToast('云端备份已更新', 'success');
+            setStatus(`✅ 已上传：原始 ${fmtBytes(rawBytes)} → gzip 后 ${fmtBytes(gzipBytes)}${secretKey ? '（API 密钥已加密随行）' : '（本机没有钥匙，API 密钥未更新——重新登录一次即可）'}`);
+            addToast('云端数据已更新', 'success');
             const meta = await cloudSyncPeek(config, session).catch(() => null);
             setRemote(meta);
         } catch (e) {
@@ -187,19 +190,15 @@ const CloudSyncSettings: React.FC = () => {
 
     const handlePull = async () => {
         if (!session) return;
-        if (!window.confirm('将用云端备份覆盖本机当前全部数据（角色、聊天、设置都会被替换）。确定继续？')) return;
+        if (!window.confirm('将用云端数据覆盖本机当前全部数据（角色、聊天、设置都会被替换）。确定继续？')) return;
         setBusy('pull');
         setStatus('');
         try {
             trackEvent('云同步恢复');
-            const dataZip = await cloudSyncPull(config, session, cryptoPassword, msg => setStatus(msg));
+            const dataZip = await cloudSyncPull(config, session, '', msg => setStatus(msg));
             let finalZip = dataZip;
-            if (cryptoPassword) {
-                try {
-                    const { secretsJson } = await cloudSyncPullSecrets(config, session, cryptoPassword);
-                    if (secretsJson) finalZip = await mergeBackupSecrets(dataZip, secretsJson);
-                } catch { /* API 密钥解不开 → 只恢复数据 */ }
-            }
+            const { secretsJson } = await cloudSyncPullSecrets(config, session).catch(() => ({ secretsJson: null as string | null }));
+            if (secretsJson) finalZip = await mergeBackupSecrets(dataZip, secretsJson);
             // 走与手动导入 zip 完全相同的管道（含分片校验与进度 UI）
             await importSystem(new File([finalZip], 'sully_cloud_sync.zip', { type: 'application/zip' }));
             setStatus('✅ 已从云端恢复，刷新后生效');
@@ -211,37 +210,31 @@ const CloudSyncSettings: React.FC = () => {
         }
     };
 
-    const handleLogout = () => {
+    const handleLogout = async () => {
         cloudSyncLogout();
+        await forgetSecretKey();   // 本机钥匙一起清掉：退出后这台机器再也解不开云端密钥
         setSession(null);
         setRemote(null);
-        setCryptoPassword('');
-        try { sessionStorage.removeItem('os_cloud_sync_pass_v1'); } catch { /* ignore */ }
+        setKeyReady(false);
         addToast('已退出云同步账号（云端数据保留）', 'info');
     };
 
-    // ── 同步 API 密钥到本机 ──
-    // 用户模型：密钥（API key 等）加密存云端；聊天的 API 请求永远从本地浏览器直发。
-    // 换设备登录后数据免密自动回来，但密钥只有输对账号密码才能解——这个按钮把云端
-    // 那份密钥解密后写进本机（只动密钥相关配置，不碰角色/聊天/日程等本地数据）。
+    // ── 手动同步一次（兜底入口）──
+    // 平时不需要点：登录后每次打开页面都会自动拉最新数据 + 自动解密 API 密钥。
+    // 这个按钮用于「刚在另一台设备改了配置，想立刻拿过来」的场景。
     const handleSyncKeys = async () => {
         if (!session) return;
-        if (!cryptoPassword) {
-            addToast('请先在下方输入账号密码解锁，才能解密云端密钥', 'error');
-            return;
-        }
         setBusy('keys');
         setStatus('');
         try {
             trackEvent('云同步拉取密钥');
-            const { secretsJson, locked } = await cloudSyncPullSecrets(config, session, cryptoPassword);
+            const { secretsJson, locked } = await cloudSyncPullSecrets(config, session);
             if (locked) {
-                setStatus('❌ 密码不匹配，无法解密云端密钥');
-                addToast('密码不匹配，解密失败', 'error');
+                setStatus('❌ 本机还没有解密钥匙：请退出登录后用邮箱+密码重新登录一次，之后就全自动了');
                 return;
             }
             if (!secretsJson || secretsJson === '{}') {
-                setStatus('云端还没有密钥——本机解锁状态下点「手动上传」或等自动同步，会把密钥推上去');
+                setStatus('云端还没有 API 配置——本机配好后切走一次页面（或点下方手动上传）就会自动推上去');
                 return;
             }
             const secrets = JSON.parse(secretsJson) as Record<string, any>;
@@ -288,10 +281,10 @@ const CloudSyncSettings: React.FC = () => {
             import('../../utils/lsMirror').then(m => m.snapshotLocalStorageMirror()).catch(() => {});
 
             if (applied.length === 0) {
-                setStatus('云端密钥包里没有可识别的字段（可能用旧版上传过，解锁后再手动上传一次即可）');
+                setStatus('云端这份配置里没有可识别的字段（旧版本推的），本机配好后再上传一次即可');
             } else {
-                setStatus(`✅ 已把密钥同步到本机：${applied.join('、')}。请求仍从本机浏览器直发，刷新页面后全部生效`);
-                addToast('API 密钥已同步到本机', 'success');
+                setStatus(`✅ 已同步到本机：${applied.join('、')}。API 请求仍从本机浏览器直发，刷新页面后全部生效`);
+                addToast('云端 API 配置已同步到本机', 'success');
             }
         } catch (e) {
             setStatus(`❌ ${e instanceof Error ? e.message : '同步密钥失败'}`);
@@ -323,7 +316,7 @@ const CloudSyncSettings: React.FC = () => {
 
             {open && <div className="space-y-3">
                 <p className="text-xs text-slate-500 leading-relaxed">
-                    注册一个账号（邮箱+密码），数据自动同步到云端（含 API 配置）；换设备登录同一账号，数据自动回来。平时全程自动，无需手动上传/恢复。
+                    邮箱+密码登录一次，全部数据（聊天、角色、设置、API 配置）就都在云端了。换设备/换浏览器登录同一账号，打开就是上次的样子——不用导入、不用输第二次密码。
                 </p>
 
                 {/* 连接配置：内置官方服务器，默认无需填写；收进折叠里供自部署用户替换 */}
@@ -338,15 +331,9 @@ const CloudSyncSettings: React.FC = () => {
                             <span className="mb-1.5 block text-[10px] font-bold text-slate-500">anon key</span>
                             <input value={config.supabaseAnonKey} onChange={e => persistConfig({ ...config, supabaseAnonKey: e.target.value })} placeholder="项目设置 → API → anon public" type="password" spellCheck={false} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-violet-400 focus:ring-2 focus:ring-violet-100" />
                         </label>
-                        <div className="flex gap-2">
-                            <button onClick={runProbe} disabled={busy === 'probe' || !connected} className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all ${connected ? 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50' : 'bg-slate-100 text-slate-300'}`}>
-                                {busy === 'probe' ? '探测中…' : '测试连接'}
-                            </button>
-                            <label className="flex items-center gap-2 px-3 rounded-xl border border-slate-200 bg-white text-xs text-slate-600 cursor-pointer">
-                                <input type="checkbox" checked={config.autoSync} onChange={e => persistConfig({ ...config, autoSync: e.target.checked })} className="accent-violet-500" />
-                                自动上传
-                            </label>
-                        </div>
+                        <button onClick={runProbe} disabled={busy === 'probe' || !connected} className={`w-full py-2.5 rounded-xl text-xs font-bold transition-all ${connected ? 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50' : 'bg-slate-100 text-slate-300'}`}>
+                            {busy === 'probe' ? '探测中…' : '测试连接'}
+                        </button>
                         {probe && (
                             <p className={`text-[11px] leading-relaxed px-3 py-2 rounded-xl ${probe.ok ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>{probe.ok ? '✅ ' : '⚠️ '}{probe.message}</p>
                         )}
@@ -397,7 +384,7 @@ const CloudSyncSettings: React.FC = () => {
                             </div>
                         )}
 
-                        {/* 密钥同步：数据免密自动走，API 密钥加密存云端——这里一键解密写回本机 */}
+                        {/* 状态说明 + 兜底的「立刻拉一次」按钮（平时不用点，打开页面就自动同步） */}
                         <div className="rounded-2xl bg-sky-50/50 border border-sky-100 p-3 space-y-2">
                             <div className="flex items-center gap-2">
                                 <div className="p-1.5 bg-sky-100/70 rounded-lg text-sky-600 shrink-0">
@@ -406,79 +393,35 @@ const CloudSyncSettings: React.FC = () => {
                                     </svg>
                                 </div>
                                 <p className="text-[10px] text-slate-500 leading-relaxed flex-1">
-                                    API 密钥加密存在云端（数据则自动同步、无需密码）。在这里把别台设备存上去的密钥解密同步到本机使用——聊天的 API 请求始终由本机浏览器直接发出，不经过任何服务器转发密钥。
+                                    {keyReady
+                                        ? '全部数据（聊天、角色、设置、API 配置）都在云端。打开页面即自动拉最新、离开页面即自动上传，不需要任何手动步骤。API 请求始终由本机浏览器直接发出。'
+                                        : '本机还没有解密钥匙（老版本升级上来的）：退出登录后用邮箱+密码重新登录一次，之后 API 配置也会跟着自动同步。'}
                                 </p>
                             </div>
-                            {session && !cryptoPassword ? (
-                                <div className="flex gap-2">
-                                    <input
-                                        type="password"
-                                        value={password}
-                                        onChange={e => setPassword(e.target.value)}
-                                        placeholder="输入账号密码解锁密钥"
-                                        className="flex-1 bg-white border border-sky-200 rounded-xl px-3 py-2 text-[11px] outline-none focus:border-sky-400"
-                                    />
-                                    <button
-                                        onClick={() => {
-                                            if (!password) { addToast('请输入账号密码', 'error'); return; }
-                                            setCryptoPassword(password);
-                                            try { sessionStorage.setItem('os_cloud_sync_pass_v1', password); } catch { /* ignore */ }
-                                            addToast('已解锁，可以同步密钥了', 'success');
-                                        }}
-                                        className="px-4 py-2 rounded-xl text-[11px] font-bold bg-sky-500 text-white shadow-sm shadow-sky-200 active:scale-95 transition-all"
-                                    >
-                                        解锁
-                                    </button>
-                                </div>
-                            ) : (
-                                <button
-                                    onClick={handleSyncKeys}
-                                    disabled={busy === 'keys'}
-                                    className="w-full py-2.5 rounded-xl text-xs font-bold bg-sky-500 text-white shadow-sm shadow-sky-200 active:scale-95 transition-all disabled:opacity-50"
-                                >
-                                    {busy === 'keys' ? '正在解密同步…' : '同步云端 API 密钥到本机'}
-                                </button>
-                            )}
+                            <button
+                                onClick={handleSyncKeys}
+                                disabled={busy === 'keys'}
+                                className="w-full py-2.5 rounded-xl text-xs font-bold bg-sky-500 text-white shadow-sm shadow-sky-200 active:scale-95 transition-all disabled:opacity-50"
+                            >
+                                {busy === 'keys' ? '正在同步…' : '立刻同步云端 API 配置到本机'}
+                            </button>
                         </div>
 
                         <details className="rounded-2xl bg-slate-50/70 border border-slate-100">
                             <summary className="px-3 py-2 text-[11px] font-bold text-slate-400 cursor-pointer select-none">高级操作（手动上传/恢复）</summary>
                             <div className="p-3 pt-0 space-y-2">
-                                {session && !cryptoPassword && (
-                                    <div className="rounded-2xl border border-amber-100 bg-amber-50/70 p-3 space-y-2">
-                                        <p className="text-[10px] text-amber-600 leading-relaxed">
-                                            🔒 备份采用端到端加密（AES-256-GCM，密钥由你的账号密码在浏览器内派生），口令不落盘、页面刷新后即锁定。请重新输入一次账号密码解锁手动操作：
-                                        </p>
-                                        <div className="flex gap-2">
-                                            <input
-                                                type="password"
-                                                value={password}
-                                                onChange={e => setPassword(e.target.value)}
-                                                placeholder="账号密码（解锁加密）"
-                                                className="flex-1 bg-white border border-amber-200 rounded-xl px-3 py-2 text-[11px] outline-none focus:border-amber-400"
-                                            />
-                                            <button
-                                                onClick={() => {
-                                                    if (!password) { addToast('请输入账号密码', 'error'); return; }
-                                                    setCryptoPassword(password);
-                                                    try { sessionStorage.setItem('os_cloud_sync_pass_v1', password); } catch { /* ignore */ }
-                                                    addToast('已解锁端到端加密', 'success');
-                                                }}
-                                                className="px-4 py-2 rounded-xl text-[11px] font-bold bg-amber-400 text-white shadow-sm active:scale-95 transition-all"
-                                            >
-                                                解锁
-                                            </button>
-                                        </div>
-                                    </div>
-                                )}
                                 <div className="flex gap-2">
-                                    <button onClick={handlePush} disabled={busy === 'push' || !cryptoPassword} className="flex-1 py-2.5 rounded-xl text-xs font-bold bg-violet-500 text-white shadow-sm shadow-violet-200 active:scale-95 transition-all disabled:opacity-50">
-                                        {busy === 'push' ? '加密上传中…' : '⬆ 手动上传本机数据'}
+                                    <button onClick={handlePush} disabled={busy === 'push'} className="flex-1 py-2.5 rounded-xl text-xs font-bold bg-violet-500 text-white shadow-sm shadow-violet-200 active:scale-95 transition-all disabled:opacity-50">
+                                        {busy === 'push' ? '上传中…' : '⬆ 立刻上传本机数据'}
                                     </button>
-                                    <button onClick={handlePull} disabled={busy === 'pull' || !cryptoPassword} className="flex-1 py-2.5 rounded-xl text-xs font-bold bg-white border border-violet-200 text-violet-600 hover:bg-violet-50 active:scale-95 transition-all disabled:opacity-50">
-                                        {busy === 'pull' ? '解密恢复中…' : '⬇ 手动恢复到本机'}
+                                    <button onClick={handlePull} disabled={busy === 'pull'} className="flex-1 py-2.5 rounded-xl text-xs font-bold bg-white border border-violet-200 text-violet-600 hover:bg-violet-50 active:scale-95 transition-all disabled:opacity-50">
+                                        {busy === 'pull' ? '恢复中…' : '⬇ 用云端覆盖本机'}
                                     </button>
                                 </div>
+                                <label className="flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white text-[11px] text-slate-600 cursor-pointer">
+                                    <input type="checkbox" checked={config.autoSync} onChange={e => persistConfig({ ...config, autoSync: e.target.checked })} className="accent-violet-500" />
+                                    自动同步（关掉后打开页面不再自动拉云端数据）
+                                </label>
                             </div>
                         </details>
                         <button onClick={handleLogout} className="w-full py-2 rounded-xl text-[11px] font-bold text-slate-400 hover:text-slate-600 transition-colors">退出登录（云端数据保留）</button>
@@ -489,7 +432,7 @@ const CloudSyncSettings: React.FC = () => {
                     <p className="text-[11px] text-slate-500 leading-relaxed px-3 py-2 rounded-xl bg-slate-50 break-words">{status}</p>
                 )}
                 <p className="text-[10px] text-slate-400 leading-relaxed">
-                    上传内容 = 「设置 → 导出备份」的文本档（含 API 配置与全部设置；图片视频等媒体不入云，恢复后由本机相册/媒体库对应），整包经你的账号密码派生密钥（PBKDF2·21 万次）做 AES-256-GCM 端到端加密后才离开浏览器——数据库被拖库也只见密文，Supabase 与本站代码里都没有明文密钥。免费套餐 500MB 对个人足够；接近上限会提前提醒。心跳每 30 分钟自动打点，防止免费项目 7 天无活动被暂停。
+                    同步内容 = 「设置 → 导出备份」的文本档（角色、聊天、设置、API 配置全都在；图片视频等媒体不入云，恢复后由本机相册/媒体库对应）。角色与聊天按账号行级隔离存云端（只有你的登录凭据能读写自己那行）；API 密钥这批敏感字段额外用你的账号密码派生密钥（PBKDF2·21 万次）做 AES-256-GCM 加密后才离开浏览器——数据库被拖库也只见密文，密码本身不落任何存储。免费套餐 500MB 对个人足够；接近上限会提前提醒。心跳每 30 分钟自动打点，防止免费项目 7 天无活动被暂停。
                 </p>
             </div>}
         </section>
