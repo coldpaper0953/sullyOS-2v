@@ -36,12 +36,11 @@ import { getDailyScheduleForChar } from './dailySchedule';
 const CONFIG_KEY = 'sullyos_backend_chat_v1';
 const CLIENT_ID_KEY = 'sullyos_backend_client_id_v1';
 
-const DEFAULT_BACKEND_BASE_URL = typeof window !== 'undefined'
-    && window.location.protocol === 'https:'
-    && window.location.hostname !== 'localhost'
-    && window.location.hostname !== '127.0.0.1'
-    ? window.location.origin
-    : 'http://127.0.0.1:43210';
+// 自主后端默认地址：永远是本机的自建服务端口。
+// 曾经在 https 站点上默认取 window.location.origin——那是静态站点自己的地址（GitHub
+// Pages 之类），根本不是后端：面板看起来像"已经配好了"，一旦开启就会朝着放页面的
+// 静态主机反复发 /v1/... 请求并全部 404（用户在网络日志里看到"请求发去了 git 仓库"）。
+const DEFAULT_BACKEND_BASE_URL = 'http://127.0.0.1:43210';
 
 export interface BackendChatConfig {
     enabled: boolean;
