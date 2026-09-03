@@ -1119,6 +1119,24 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       })();
   }, [isDataLoaded, realtimeConfig, cloudBackupConfig, memoryPalaceConfig, remoteVectorConfig, apiConfig, apiPresets, characters]);
 
+  // --- 存储过载自检 ---
+  // 启动数据就绪后量一次内置存储。逼近配额（85%）时 toast 提醒用户去
+  // 设置 → 存储保护 用 AI 分层摘要旧聊天（自动压缩要花用户的 API 额度，
+  // 不经确认就静默烧钱不合适——提醒 + 一键入口是折中）。只提醒一次。
+  const storageGuardCheckedRef = useRef(false);
+  useEffect(() => {
+      if (!isDataLoaded || storageGuardCheckedRef.current) return;
+      storageGuardCheckedRef.current = true;
+      void (async () => {
+          try {
+              const { isStorageNearLimit, measureStorage } = await import('../utils/storageGuard');
+              if (!(await isStorageNearLimit())) return;
+              const m = await measureStorage();
+              addToast(`内置存储已用 ${(m.ratio * 100).toFixed(0)}%，接近配额。建议到「设置 → 存储保护」用 AI 摘要旧聊天记录`, 'info');
+          } catch { /* 测不了就当健康 */ }
+      })();
+  }, [isDataLoaded]);
+
   // --- 云端账号同步（Supabase）自动上传 ---
   // autoSync 开 + 已登录：页面隐藏（切走/最小化/关机前 pagehide）时把本机数据
   // 静默推到用户自己的 Supabase。失败只 console.warn——自动链路不打扰用户，

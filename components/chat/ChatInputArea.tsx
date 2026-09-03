@@ -116,13 +116,15 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     const actionsSwipeMoved = useRef(false);
     const useIOSStandaloneInputFix = isIOSStandaloneWebApp();
 
-    // Enter 发送（Shift+Enter 换行）。输入法选词回车不算发送——React 的合成事件在
-    // 部分浏览器上 keydown 晚于 compositionend，必须同时查 isComposing 和 keyCode。
+    // 回车只换行、不发送（手机虚拟键盘同理，enterKeyHint 移除 send）；发送一律点按钮。
     const handleKeyDown = (e: React.KeyboardEvent) => {
-        if (e.key !== 'Enter' || e.shiftKey) return;
+        if (e.key !== 'Enter') return;
         if (e.nativeEvent.isComposing || e.keyCode === 229) return;
         e.preventDefault();
-        onSend();
+        const el = e.currentTarget;
+        const { selectionStart, selectionEnd, value } = el;
+        setInput(value.slice(0, selectionStart) + '\n' + value.slice(selectionEnd));
+        requestAnimationFrame(() => { el.selectionStart = el.selectionEnd = selectionStart + 1; });
     };
 
     const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>, type: 'chat' | 'bg') => {
@@ -446,10 +448,9 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                             rows={1} 
                             value={input} 
                             onChange={(e) => setInput(e.target.value)} 
-                            onKeyDown={handleKeyDown} 
+                            onKeyDown={handleKeyDown}
                             onFocus={handleInputFocus}
                             inputMode="text"
-                            enterKeyHint="send"
                             autoCorrect="on"
                             autoCapitalize="sentences"
                             className={`flex-1 min-w-0 bg-transparent px-4 py-3 ${useIOSStandaloneInputFix ? 'text-[16px]' : 'text-[15px]'} resize-none max-h-24 no-scrollbar ${isDiscordStyle ? 'text-white placeholder:text-slate-500' : isPixelStyle ? 'text-[#6a4c35] placeholder:text-[#9b8677]' : ''}`} 
@@ -460,10 +461,9 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                             <Smiley className="w-6 h-6" weight="regular" />
                         </button>
                     </div>
-                    <button 
-                        onClick={onSend} 
-                        disabled={!input.trim()} 
-                        className={`${sendButtonClass} ${input.trim() ? '' : 'opacity-45 shadow-none'}`}
+                    <button
+                        onClick={onSend}
+                        className={sendButtonClass}
                     >
                         {sendButtonStyle === 'pill' ? <span>发送</span> : <PaperPlaneTilt className="w-5 h-5" weight="fill" />}
                     </button>

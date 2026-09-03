@@ -3501,7 +3501,12 @@ const Chat: React.FC = () => {
     }), [emojis, activeCategory, hiddenCategoryIds]);
 
     // Memoize ChatInputArea callbacks
-    const handleSendCallback = useCallback(() => handleSendText(), [char, input, replyTarget]);
+    // 空输入点发送 = 原顶栏 ⚡ 的「手动触发 AI」：不插任何假消息，AI 直接读全部聊天记录
+    // 再回复（原版 handleManualTrigger 的行为，只是入口挪到了发送按钮）。
+    const handleSendCallback = useCallback(() => {
+        if (input.trim()) { handleSendText(); return; }
+        handleManualTrigger();
+    }, [char, input, replyTarget, isTyping, messages, instantSendingActive]);
     const handleCharSelectCallback = useCallback((id: string) => { setActiveCharacterId(id); setShowPanel('none'); }, []);
     // 角色自定义聊天背景：字段值可能是 blobref 令牌（二进制在 IndexedDB），这里解析成能直接
     // 喂进 CSS url() 的地址；data: / http(s) 之类的非令牌值渲染期原样透传。

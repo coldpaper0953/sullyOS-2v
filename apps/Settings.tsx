@@ -34,6 +34,7 @@ import { ActiveMsgClient } from '../utils/activeMsgClient';
 import VersionInfo from '../components/settings/VersionInfo';
 import BackendSettings from '../components/settings/BackendSettings';
 import CloudSyncSettings from '../components/settings/CloudSyncSettings';
+import StorageGuardSettings from '../components/settings/StorageGuardSettings';
 import { isPushVapidReady } from '../utils/pushVapid';
 import ApiCallLogModal from '../components/settings/ApiCallLogModal';
 import StorageUsagePanel from '../components/settings/StorageUsagePanel';
@@ -3534,6 +3535,9 @@ const Settings: React.FC = () => {
 
         {/* ───────── 云端账号同步（Supabase 账号制） ───────── */}
         <CloudSyncSettings />
+
+        {/* ───────── 存储保护（500MB 过载保护 + AI 分层摘要） ───────── */}
+        <StorageGuardSettings />
 
         <VersionInfo />
 
