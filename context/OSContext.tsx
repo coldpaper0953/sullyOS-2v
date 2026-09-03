@@ -1174,7 +1174,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           cloudAutoSyncRef.current = true;
           void (async () => {
               try {
-                  const { loadCloudSyncConfig, loadCloudSyncSession, cloudSyncPush, splitBackupSecrets, resolveSecretKey } = await import('../utils/cloudSync');
+                  const { loadCloudSyncConfig, loadCloudSyncSession, cloudSyncPush, splitBackupSecrets, resolveSecretKey, cloudPushOnHold } = await import('../utils/cloudSync');
+                  if (cloudPushOnHold()) {
+                      console.warn('[云同步] 刚从云端导入完，静默期内不回推（防两台设备互相触发重启）');
+                      return;
+                  }
                   const cfg = loadCloudSyncConfig();
                   const session = loadCloudSyncSession();
                   if (!cfg.autoSync || !session || !cfg.supabaseUrl || !cfg.supabaseAnonKey) return;
@@ -1223,13 +1227,20 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       cloudPullCheckedRef.current = true;
       void (async () => {
           try {
-              const { loadCloudSyncConfig, loadCloudSyncSession, cloudSyncPeek } = await import('../utils/cloudSync');
+              // 同一个浏览器会话只允许自动导入一次：导入会触发整页重启，重启后又符合
+              // 「云端更新」条件的话就会无限重启（用户实测遇到过）。这道闸与下面的
+              // 快照指纹去重是两层独立保险。
+              try {
+                  if (sessionStorage.getItem('os_cloud_pull_done_v1')) return;
+              } catch { /* 隐私模式读不到就跳过这层 */ }
+              const { loadCloudSyncConfig, loadCloudSyncSession, cloudSyncPeek, cloudSnapshotAlreadyImported } = await import('../utils/cloudSync');
               const cfg = loadCloudSyncConfig();
               const session = loadCloudSyncSession();
               if (!cfg.autoSync || !session?.accessToken) return;
               const lastLocalSync = Number(localStorage.getItem('os_cloud_sync_last_push_v1') || '0');
               const meta = await cloudSyncPeek(cfg, session).catch(() => null);
               if (!meta || meta.pushedAt <= lastLocalSync) return; // 云端没更新（或本机就是最后推的）→ 不动
+              if (cloudSnapshotAlreadyImported(meta.pushedAt, meta.gzipBytes)) return; // 这一版导过了
               // 云端有别台设备的新数据 → 静默拉回（明文数据包 + 本机钥匙解密的 API 密钥）
               const { cloudSyncPull, cloudSyncPullSecrets, mergeBackupSecrets } = await import('../utils/cloudSync');
               const dataZip = await cloudSyncPull(cfg, session, '', undefined).catch(() => null);
@@ -1237,6 +1248,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               let finalZip = dataZip;
               const { secretsJson } = await cloudSyncPullSecrets(cfg, session).catch(() => ({ secretsJson: null as string | null }));
               if (secretsJson) finalZip = await mergeBackupSecrets(dataZip, secretsJson);
+              try { sessionStorage.setItem('os_cloud_pull_done_v1', '1'); } catch { /* ignore */ }
               await cloudPullImportRef.current(new File([finalZip], 'sully_cloud_sync.zip', { type: 'application/zip' }));
               cloudPullToastRef.current('已从云端同步另一台设备的最新数据', 'success');
           } catch (e) {

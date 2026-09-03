@@ -102,6 +102,30 @@ end $$;
 
 const LS_CONFIG = 'os_cloud_sync_config_v1';
 const LS_SESSION = 'os_cloud_sync_session_v1';
+/** 已导入过的云端快照指纹（pushedAt:gzipBytes）——同一版永不重复导入。 */
+const LS_SEEN_SNAPSHOT = 'os_cloud_sync_seen_snapshot_v1';
+/** 刚从云端导入完，这个时间点之前不自动上传（防两台设备互相触发重启）。 */
+const LS_PUSH_HOLD_UNTIL = 'os_cloud_sync_push_hold_v1';
+
+export const snapshotFingerprint = (pushedAt: number, gzipBytes: number) => `${pushedAt}:${gzipBytes}`;
+
+/** 这一版云端快照本机是不是已经导入过了（导入过就别再导，否则会反复重启）。 */
+export function cloudSnapshotAlreadyImported(pushedAt: number, gzipBytes: number): boolean {
+    try {
+        return localStorage.getItem(LS_SEEN_SNAPSHOT) === snapshotFingerprint(pushedAt, gzipBytes);
+    } catch {
+        return false;
+    }
+}
+
+/** 自动上传是否处于「刚导入完的静默期」。 */
+export function cloudPushOnHold(): boolean {
+    try {
+        return Date.now() < Number(localStorage.getItem(LS_PUSH_HOLD_UNTIL) || '0');
+    } catch {
+        return false;
+    }
+}
 
 export interface CloudSyncConfig {
     supabaseUrl: string;      // e.g. https://xxxx.supabase.co
@@ -643,16 +667,22 @@ export async function cloudSyncPull(config: CloudSyncConfig, sessionIn: CloudSyn
     if (!session) throw new CloudSyncApiError('登录已过期，请重新登录', 401);
     onProgress?.('正在下载云端备份…');
     const res = await fetch(
-        `${baseUrl(config)}/rest/v1/sully_user_data?select=gzip_b64,snapshot_version,pushed_at&user_id=eq.${encodeURIComponent(session.userId)}&limit=1`,
+        `${baseUrl(config)}/rest/v1/sully_user_data?select=gzip_b64,snapshot_version,pushed_at,gzip_bytes&user_id=eq.${encodeURIComponent(session.userId)}&limit=1`,
         { headers: authHeaders(config, session) },
     );
     const rows = await jsonOrThrow(res, '下载失败');
     if (!Array.isArray(rows) || rows.length === 0 || !rows[0]?.gzip_b64) {
         throw new Error('云端还没有数据。先在本机点「立刻上传」推一份。');
     }
-    // 本机水位对齐到刚拉下来的这一版：不然开机自动拉新会认为「云端还比本机新」，
-    // 每次启动都重复拉一遍同样的数据。
-    try { localStorage.setItem('os_cloud_sync_last_push_v1', String(Number(rows[0].pushed_at) || Date.now())); } catch { /* ignore */ }
+    // 记账两件事，缺一样就会出现「反复恢复数据 + 重启」的死循环：
+    //   1. 水位时间：本机已经和云端这一版对齐（开机拉新靠它判断云端有没有更新）
+    //   2. 快照身份：这一版的指纹，导过一次就永不重复导（时钟异常/写入失败时的兜底）
+    try {
+        localStorage.setItem('os_cloud_sync_last_push_v1', String(Number(rows[0].pushed_at) || Date.now()));
+        localStorage.setItem(LS_SEEN_SNAPSHOT, snapshotFingerprint(Number(rows[0].pushed_at) || 0, Number(rows[0].gzip_bytes) || 0));
+        // 刚从云端拿的这份就是本机现状，别马上又推回去——两台设备会互相触发无限重启
+        localStorage.setItem(LS_PUSH_HOLD_UNTIL, String(Date.now() + 120_000));
+    } catch { /* ignore */ }
     onProgress?.('正在解压…');
     const bytes = await gunzipB64ToBytes(rows[0].gzip_b64);
     // v2 明文：字节就是 zip 本身；v1 旧整包：字节是 CipherEnvelope JSON，需密码解密
