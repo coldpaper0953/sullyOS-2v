@@ -1,0 +1,6 @@
+name = "sullyos-api-proxy"
+main = "src/index.js"
+compatibility_date = "2024-09-01"
+# 转发目标：改成你的 API 服务商（默认 tokenrouter）
+[vars]
+TARGET_HOST = "https://api.tokenrouter.com"
