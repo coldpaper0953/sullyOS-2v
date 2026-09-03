@@ -219,18 +219,26 @@ const CloudSyncSettings: React.FC = () => {
         addToast('已退出云同步账号（云端数据保留）', 'info');
     };
 
-    // ── 手动同步一次（兜底入口）──
-    // 平时不需要点：登录后每次打开页面都会自动拉最新数据 + 自动解密 API 密钥。
-    // 这个按钮用于「刚在另一台设备改了配置，想立刻拿过来」的场景。
-    const handleSyncKeys = async () => {
+    // ── 同步 API 配置到本机 ──
+    // 平时不用点：登录后每次打开页面都会自动拉。这个入口用于两种情况：
+    //   1. 刚在另一台设备改了配置，想立刻拿过来
+    //   2. 本机还没有解密钥匙（旧版本时期登录的设备）→ 传一次账号密码把钥匙补上，
+    //      之后这台设备永久免密。
+    const handleSyncKeys = async (passwordOnce?: string) => {
         if (!session) return;
         setBusy('keys');
         setStatus('');
         try {
             trackEvent('云同步拉取密钥');
-            const { secretsJson, locked } = await cloudSyncPullSecrets(config, session);
+            if (passwordOnce) {
+                const k = await resolveSecretKey(session.userId, passwordOnce);
+                setKeyReady(Boolean(k));
+            }
+            const { secretsJson, locked } = await cloudSyncPullSecrets(config, session, passwordOnce);
             if (locked) {
-                setStatus('❌ 本机还没有解密钥匙：请退出登录后用邮箱+密码重新登录一次，之后就全自动了');
+                setStatus(passwordOnce
+                    ? '❌ 密码不对，解不开云端的 API 配置（就是你注册/登录用的那个密码）'
+                    : '❌ 本机还没有解密钥匙：在上面输入一次账号密码即可（只需一次，之后永久免密）');
                 return;
             }
             if (!secretsJson || secretsJson === '{}') {
@@ -395,15 +403,24 @@ const CloudSyncSettings: React.FC = () => {
                                 <p className="text-[10px] text-slate-500 leading-relaxed flex-1">
                                     {keyReady
                                         ? '全部数据（聊天、角色、设置、API 配置）都在云端。打开页面即自动拉最新、离开页面即自动上传，不需要任何手动步骤。API 请求始终由本机浏览器直接发出。'
-                                        : '本机还没有解密钥匙（老版本升级上来的）：退出登录后用邮箱+密码重新登录一次，之后 API 配置也会跟着自动同步。'}
+                                        : '这台设备还没有解密钥匙（在旧版本时期登录的）：在下面输入一次账号密码，就能把云端的 API 配置解下来，之后这台设备永久免密自动同步。'}
                                 </p>
                             </div>
+                            {!keyReady && (
+                                <input
+                                    type="password"
+                                    value={password}
+                                    onChange={e => setPassword(e.target.value)}
+                                    placeholder="账号密码（只需输一次）"
+                                    className="w-full bg-white border border-sky-200 rounded-xl px-3 py-2 text-[11px] outline-none focus:border-sky-400"
+                                />
+                            )}
                             <button
-                                onClick={handleSyncKeys}
-                                disabled={busy === 'keys'}
+                                onClick={() => void handleSyncKeys(keyReady ? undefined : password)}
+                                disabled={busy === 'keys' || (!keyReady && !password)}
                                 className="w-full py-2.5 rounded-xl text-xs font-bold bg-sky-500 text-white shadow-sm shadow-sky-200 active:scale-95 transition-all disabled:opacity-50"
                             >
-                                {busy === 'keys' ? '正在同步…' : '立刻同步云端 API 配置到本机'}
+                                {busy === 'keys' ? '正在同步…' : keyReady ? '立刻同步云端 API 配置到本机' : '解锁并同步 API 配置'}
                             </button>
                         </div>
 
