@@ -60,3 +60,5 @@ xiaohongshu-skills/
 # TIAO-Capacitor local Android toolchain and caches (D: only, never committed)
 .android-sdk/
 .gradle-user-home/
+"$null"  
+"scripts-tmp/"  
