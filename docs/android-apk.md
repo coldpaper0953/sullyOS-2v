@@ -6,11 +6,12 @@
 ## 首次安装
 
 1. 手机浏览器打开：<https://github.com/coldpaper0953/sullyOS-2v/releases>
-2. 下载最新版 `SullyOS-2v-Android-v*.apk`
+2. 下载最新版 `SullyOS-2v-Android-v1.0.3.apk`（34 MB）
 3. 点开下载的文件 → 系统会提示「允许安装未知应用」→ 允许 → 安装
 4. 装完打开即用。数据存在本机（IndexedDB），卸载会丢，记得备份
 
 ## 升级新版
+
 
 重新触发流水线（GitHub 仓库 → Actions → Build Android APK → Run workflow，
 填个更大的版本号）或推 `android-v*` 标签。新 APK 出来后直接覆盖安装——
