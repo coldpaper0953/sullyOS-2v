@@ -32,29 +32,36 @@
 
 ## 聊天 API 配置（重要）
 
-**tokenrouter 直连在任何浏览器/APK 里都不可能成功**：它的 WAF（openresty）对任何
-带 `Origin` 请求头的请求一律返回 403 且不给 CORS 头，浏览器只能报
-「TypeError: Failed to fetch」。实测（2026-09-05）：
+**tokenrouter 直连在 APK 和线上站里都不可能成功**：它的 WAF（openresty）按 Origin
+精确白名单放行，**只认 `:5173` 端口**。实测（2026-09-05，同一 key 只换 Origin 头）：
 
-| 客户端 | Origin | 结果 |
-|---|---|---|
-| curl 不带 Origin | — | 401（要鉴权，说明服务本身通） |
-| curl 带 `Origin: https://localhost` | APK | **403** |
-| curl 带 `Origin: http://127.0.0.1:4173` | 本地页 | **403** |
-| curl 带 `Origin: https://coldpaper0953.github.io` | 线上站 | **403** |
-| 真浏览器 fetch（本地页） | 本地页 | **Failed to fetch** |
+| Origin | 结果 |
+|---|---|
+| 不带 Origin（服务端请求） | 401（要鉴权，服务本身通） |
+| `http://localhost:5173` | **401 + `Access-Control-Allow-Origin` 回显**（放行） |
+| `http://127.0.0.1:5173` | 401（放行） |
+| `http://localhost:4173` | **403** |
+| `http://127.0.0.1:4173` | **403** |
+| `https://localhost`（APK 的 origin） | **403** |
+| `capacitor://localhost` | **403** |
+| `https://coldpaper0953.github.io` | **403** |
 
-注意这比 `worker/api-proxy/README.md` 里写的更严——连 localhost 也不放行了。
-所以必须走服务端转发，二选一：
+所以只有 vite dev（5173）能直连，**预览端口 4173、APK、线上站全都不行**——
+这不是配置或网络问题，必须走服务端转发。三条路线：
 
-1. **自建网关**（已在跑）：地址填 `http://43.138.251.91:4000/v1`，密钥用网关自己签发的
-   Key。网关预检返回 `access-control-allow-origin: *`，浏览器可直连。
-   限制：网关是 HTTP，只有 APK（v1.0.6 起）与本地页能用，**HTTPS 线上站会被混合内容挡掉**。
-2. **api-proxy Worker**（仓库自带、全平台通）：`cd worker/api-proxy && wrangler login && wrangler deploy`，
-   然后地址填 `https://sullyos-api-proxy.<你的子域>.workers.dev/v1`，密钥和模型名不用改。
-   HTTPS，线上站/APK/本地页都能用。
+1. **Supabase llm 中继（推荐，已部署可用）**：地址填
+   `https://lnhwnmylxmythvttosla.supabase.co/functions/v1/llm/v1`，key 和模型名不变。
+   HTTPS + `Access-Control-Allow-Origin: *`，**APK / 线上站 / 本地页全都能用**。
+   实测预检 204、无 key 请求返回结构化 401（说明转发链路通）。
+2. **自建 Metapi 网关**：`http://43.138.251.91:4000/v1` + 网关自己签发的 Key。
+   预检 204 + `ACAO: *`。但它是 HTTP：APK（v1.0.6 起开了 allowMixedContent）与本地页可用，
+   **HTTPS 线上站会被混合内容挡掉**。
+3. **api-proxy Worker（仓库自带）**：`cd worker/api-proxy && wrangler login && wrangler deploy`，
+   地址填 `https://sullyos-api-proxy.<你的子域>.workers.dev/v1`。
 
-地址栏必须带 `/v1` 结尾（应用代码是 `baseUrl + /chat/completions`）。
+两个容易踩的点：地址必须以 `/v1` 结尾（代码是 `baseUrl + /chat/completions`）；
+模型名要填账号上真实存在的（`gpt-4o-mini` 在这个账号上不存在，tokenrouter 侧可用的是
+`z-ai/glm-5.3-free`），模型填错报的是 400 `model_not_found`，别当成网络问题。
 
 ## 与 PC 本地后端的配合
 
