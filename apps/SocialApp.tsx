@@ -1071,7 +1071,7 @@ ${identityMap}
                                                 <div className="flex items-center gap-2">
                                                     <button
                                                         onClick={() => { setReplyingTo(c); commentInputRef.current?.focus(); }}
-                                                        className="text-[10px] text-slate-300 hover:text-[#ff2442] font-medium transition-colors"
+                                                        className="text-[10px] text-slate-300 hover:text-slate-500 font-medium transition-colors"
                                                     >
                                                         回复
                                                     </button>
@@ -1082,8 +1082,9 @@ ${identityMap}
                                                 </div>
                                             </div>
                                             {c.replyToId && (
-                                                <span className="block text-[11px] text-slate-400 mt-0.5 truncate">
-                                                    回复 @{c.replyToName || '…'}
+                                                <span className="inline-flex max-w-full items-center gap-0.5 mt-1 mb-0.5 rounded-md bg-slate-100/70 px-1.5 py-0.5 text-[10px] font-medium text-slate-400">
+                                                    <span className="shrink-0">回复</span>
+                                                    <span className="truncate text-slate-500">@{c.replyToName || '…'}</span>
                                                 </span>
                                             )}
                                             <p className="text-[13px] text-slate-700 mt-0.5 leading-normal font-light">{c.content}</p>
@@ -1098,9 +1099,20 @@ ${identityMap}
                     {/* Bottom Input Bar - Absolute to sit on top of scroll area at bottom */}
                     <div className="absolute bottom-0 w-full pb-[var(--safe-bottom,0px)] z-30 pointer-events-none">
                         {replyingTo && (
-                            <div className="pointer-events-auto mx-3 mb-1 flex items-center justify-between bg-[#fff2f3] border border-[#ffd9dd] rounded-lg px-3 py-1.5">
-                                <span className="text-[11px] text-[#ff2442] font-medium truncate">回复 @{replyingTo.authorName}：{replyingTo.content.slice(0, 30)}{replyingTo.content.length > 30 ? '…' : ''}</span>
-                                <button onClick={() => setReplyingTo(null)} className="text-[#ff2442] text-xs font-bold shrink-0 ml-2 active:opacity-60">✕</button>
+                            <div className="pointer-events-auto mx-4 mb-1.5 flex items-center gap-2 bg-white/70 backdrop-blur-xl border border-white/50 rounded-2xl px-3.5 py-2 shadow-sm animate-fade-in">
+                                <span className="text-[10px] font-bold text-slate-400 shrink-0">回复</span>
+                                <span className="text-[11px] text-slate-500 font-light truncate">
+                                    <span className="font-medium text-slate-700">@{replyingTo.authorName}</span>
+                                    <span className="text-slate-300 mx-1">·</span>
+                                    {replyingTo.content.slice(0, 30)}{replyingTo.content.length > 30 ? '…' : ''}
+                                </span>
+                                <button
+                                    onClick={() => setReplyingTo(null)}
+                                    aria-label="取消回复"
+                                    className="ml-auto shrink-0 w-5 h-5 rounded-full bg-slate-100/80 text-slate-400 text-[10px] flex items-center justify-center active:scale-90 hover:text-slate-600 transition-all"
+                                >
+                                    ✕
+                                </button>
                             </div>
                         )}
                          <div className="pointer-events-auto h-16 bg-white/80 backdrop-blur-xl border-t border-white/40 px-4 flex items-center justify-between gap-4 shadow-[0_-4px_20px_rgba(0,0,0,0.03)]">
