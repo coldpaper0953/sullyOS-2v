@@ -42,6 +42,7 @@ import StorageUsagePanel from '../components/settings/StorageUsagePanel';
 import McpConnectionConsole from '../components/settings/McpConnectionConsole';
 import { DB } from '../utils/db';
 import { getBackupReminderState, setBackupReminderIntervalDays, daysSinceLastBackup, BACKUP_REMINDER_MIN_DAYS, BACKUP_REMINDER_MAX_DAYS } from '../utils/backupReminder';
+import { readAutoBackupState, setAutoBackupEnabled, setAutoBackupInterval, AUTO_BACKUP_INTERVAL_CHOICES_MS } from '../utils/githubAutoBackup';
 import {
     createAvatarModelBackup,
     getAvatarModelBackupInventory,
@@ -487,7 +488,7 @@ const Settings: React.FC = () => {
       // 改工具凭据时要连云端提示词一起刷（见 syncAmsgToolConfigAndPrompts）
       characters, groups, userProfile,
       cloudBackupConfig, updateCloudBackupConfig,
-      cloudBackupToWebDAV, cloudRestoreFromWebDAV, listCloudBackups,
+      cloudBackupToWebDAV, cloudRestoreFromWebDAV, listCloudBackups, autoBackupRunner,
       registerBackHandler,
   } = useOS();
   
@@ -612,6 +613,9 @@ const Settings: React.FC = () => {
   const [ghShowAdvanced, setGhShowAdvanced] = useState(false);
   const [ghTesting, setGhTesting] = useState(false);
   const [ghTestResult, setGhTestResult] = useState<string>('');
+
+  // GitHub 自动备份（间隔调度在 utils/githubAutoBackup.ts，状态存 localStorage）
+  const [autoBackupState, setAutoBackupState] = useState(() => readAutoBackupState());
 
   // 主代理 Worker 地址（联网搜索 / 备份代理 / Notion / 飞书 / MCD·瑞幸 MCP / 网页抓取 / 出图都走它）。
   // 入口刻意低调：默认折叠，普通用户不需要碰，开箱即用。
@@ -1650,6 +1654,27 @@ const Settings: React.FC = () => {
           const details = err?.stack || err?.message || String(err || '未知错误');
           showError('云端恢复失败', details);
       }
+  };
+
+  // GitHub auto-backup handlers — 开关/间隔改的是 localStorage 状态并立即重启调度器
+  // （obsidian-git 的 reload timers 模式），runner 从 context 拿（闭包住当前的导出+上传逻辑）。
+  const githubConnected = cloudBackupConfig.enabled && cloudBackupConfig.provider === 'github' && !!cloudBackupConfig.githubOwner;
+
+  const handleAutoBackupToggle = (enabled: boolean) => {
+      if (enabled && !githubConnected) {
+          addToast('先连接 GitHub 备份，才能开自动备份', 'error');
+          return;
+      }
+      const next = setAutoBackupEnabled(enabled, autoBackupRunner);
+      setAutoBackupState(next);
+      trackEvent('切换 GitHub 自动备份', { enabled });
+      addToast(enabled ? `自动备份已开启（每 ${Math.round(next.intervalMs / 3600000)} 小时）` : '自动备份已关闭', 'success');
+  };
+
+  const handleAutoBackupIntervalChange = (ms: number) => {
+      const next = setAutoBackupInterval(ms, autoBackupRunner);
+      setAutoBackupState(next);
+      trackEvent('修改自动备份间隔', { hours: Math.round(ms / 3600000) });
   };
 
   // GitHub backup handlers — single "测试并连接" button does verify-token +
@@ -3781,6 +3806,50 @@ const Settings: React.FC = () => {
                       </a>
                       <p className="text-[10px] text-emerald-700 leading-relaxed">
                           每次备份会创建一个新的 release（带时间戳）。想看 / 删除旧备份就去这个网址。
+                      </p>
+                  </div>
+              )}
+
+              {/* 自动备份 — 用户拍板的 4 小时调度；密钥不进备份包 */}
+              {githubConnected && (
+                  <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 space-y-2.5">
+                      <label className="flex items-center gap-2 text-[11px] text-slate-700 font-medium cursor-pointer">
+                          <input
+                              type="checkbox"
+                              checked={autoBackupState.enabled}
+                              onChange={(e) => handleAutoBackupToggle(e.target.checked)}
+                              className="rounded"
+                          />
+                          <span>自动备份（每 {Math.round(autoBackupState.intervalMs / 3600000)} 小时一次，纯文本，不含密钥）</span>
+                      </label>
+                      {autoBackupState.enabled && (
+                          <>
+                              <div className="flex items-center gap-2 flex-wrap pl-5">
+                                  <span className="text-[10px] text-slate-500">间隔:</span>
+                                  {AUTO_BACKUP_INTERVAL_CHOICES_MS.map(({ value, label }) => (
+                                      <button
+                                          key={value}
+                                          onClick={() => handleAutoBackupIntervalChange(value)}
+                                          className={`px-2.5 py-1 rounded-full text-[10px] font-bold border transition-colors ${
+                                              autoBackupState.intervalMs === value
+                                                  ? 'bg-sky-500 text-white border-sky-500'
+                                                  : 'bg-white text-slate-600 border-slate-200 hover:border-sky-300'
+                                          }`}
+                                      >
+                                          {label}
+                                      </button>
+                                  ))}
+                              </div>
+                              <p className="text-[10px] text-slate-500 leading-relaxed pl-5">
+                                  {autoBackupState.lastAutoBackupAt > 0
+                                      ? `上次自动备份: ${new Date(autoBackupState.lastAutoBackupAt).toLocaleString('zh-CN')}`
+                                      : '尚未自动备份过（开启后会马上进行第一次）'}
+                              </p>
+                          </>
+                      )}
+                      <p className="text-[10px] text-slate-500 leading-relaxed pl-5">
+                          后台挂着就行，到点自动上传；失败会在下个周期按原时间点补跑。密钥不进备份——
+                          换设备后密钥由云端账号同步层（逐键加密）自动拉回。
                       </p>
                   </div>
               )}

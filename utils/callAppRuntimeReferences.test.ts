@@ -205,7 +205,8 @@ describe('CallApp runtime references', () => {
   });
 
   it('backs retained call snapshots up as media while text-only exports keep [图片]', () => {
-    const exportSource = readFileSync(path.resolve(__dirname, '../context/OSContext.tsx'), 'utf8');
+    // 3fae29e 起导出管线在 utils/backupSystem.ts（从 OSContext 拆出），锚点跟着搬家
+    const exportSource = readFileSync(path.resolve(__dirname, './backupSystem.ts'), 'utf8');
 
     // v3 起快照令牌不再逐 store 解析：onSerialized 从落包文本统一收集、二进制走 blobs/* 旁路。
     // 这里锚收集管线本体——它一旦被移走，cameraSnapshotRef 的二进制就不再随备份。

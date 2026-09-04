@@ -111,7 +111,8 @@ describe('collaboration sidecar wiring', () => {
   });
 
   it('includes collaboration text, settings and binary files in system backup and restore', () => {
-    const os = read('context/OSContext.tsx');
+    // 3fae29e 起备份导出/导入在 utils/backupSystem.ts（从 OSContext 拆出），锚点跟着搬家
+    const os = read('utils/backupSystem.ts');
     const types = read('types.ts');
     expect(os).toContain('CollaborationStore.exportBackup(');
     expect(os).toContain('collaboration/assets/');

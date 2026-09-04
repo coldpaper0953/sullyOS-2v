@@ -89,6 +89,8 @@ import { normalizeCharacterRoomAssetsInPlace } from '../utils/roomTemplateAssets
 import { deleteBackendCharacter, flushBackendMemorySyncQueue, loadBackendChatConfig, syncBackendContext } from '../utils/backendClient';
 import { startBackendEventRuntime } from '../utils/backendEventRuntime';
 import { exportSystemImpl, importSystemImpl, resetSystemImpl, loadJSZip } from '../utils/backupSystem';
+import { startAutoBackupScheduler, stopAutoBackupScheduler, shouldSchedulerRun } from '../utils/githubAutoBackup';
+import { shouldAutoRestore, markAutoRestored, markAutoRestoreFailed, canAutoRestore, setAutoRestoreOptOut } from '../utils/autoRestore';
 
 interface ProactiveQueueEntry {
   charId: string;
@@ -301,9 +303,11 @@ interface OSContextType {
   cloudBackupToWebDAV: (mode: 'text_only' | 'media_only' | 'full') => Promise<void>;
   cloudRestoreFromWebDAV: (file: CloudBackupFile) => Promise<void>;
   listCloudBackups: () => Promise<CloudBackupFile[]>;
+  /** GitHub 自动备份的干活函数（调度器注入用）；设置页开关/改间隔也拿它重启调度 */
+  autoBackupRunner: () => Promise<{ ok: boolean; error?: string }>;
 
   // System
-  exportSystem: (mode: 'text_only' | 'media_only' | 'full') => Promise<Blob>;
+  exportSystem: (mode: 'text_only' | 'media_only' | 'full', opts?: { stripSecrets?: boolean }) => Promise<Blob>;
   importSystem: (fileOrJson: File | string) => Promise<void>; // Accept File or String
   resetSystem: () => Promise<void>;
   sysOperation: { status: 'idle' | 'processing', message: string, progress: number }; // Progress state
@@ -3271,6 +3275,96 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       return listBackups(cloudBackupConfig);
   };
 
+  // ==== GitHub 自动备份（用户 2026-09-04 拍板：每 4 小时一次，密钥不进包）====
+  // 调度骨架在 utils/githubAutoBackup.ts（仿 obsidian-git：补差算法/单飞/成功才记时间戳）。
+  // runner 用 void 包一层：自动备份的异常已经由调度器吞掉记结果，这里不许把 reject
+  // 漏给外层（比如跑在一个 effect 的 Promise 链里）触发未处理拒绝告警。
+  const autoBackupRunnerRef = useRef<(() => Promise<{ ok: boolean; error?: string }>) | null>(null);
+  if (autoBackupRunnerRef.current === null) {
+      autoBackupRunnerRef.current = async () => {
+          try {
+              // 静默模式：不转 setSysOperation/不上 toast——半夜定时跑不能打断用户正在
+              // 看的进度条；失败也只在 console 留痕（下个周期会按原锚点补跑）。
+              const blob = await exportSystem('text_only', { stripSecrets: true });
+              const { uploadBackup, cleanupOldBackups: cleanup } = await loadBackupProvider();
+              const filename = `Sully_AutoBackup_${Date.now()}.zip`;
+              const result = await uploadBackup(cloudBackupConfig, blob, filename, () => {});
+              if (!result.ok) {
+                  console.warn('[自动备份] 上传失败:', result.message);
+                  return { ok: false, error: result.message };
+              }
+              updateCloudBackupConfig({ lastBackupTime: Date.now(), lastBackupSize: blob.size });
+              await cleanup(cloudBackupConfig, 5).catch(() => {});
+              trackEvent('自动备份到 GitHub', { result: '成功', size: blob.size });
+              return { ok: true };
+          } catch (e: any) {
+              console.warn('[自动备份] 失败:', e?.message || e);
+              trackEvent('自动备份到 GitHub', { result: '失败' });
+              return { ok: false, error: e?.message || String(e) };
+          }
+      };
+  }
+
+  // 启动/停掉调度：数据加载完成 + GitHub 已连接才挂 timer；配置一变（关开关、断连接、
+  // 换到 WebDAV）立刻拆。runner 走 ref 固定身份，避免 effect 反复重启 timer。
+  useEffect(() => {
+      const runner = autoBackupRunnerRef.current!;
+      if (isDataLoaded && shouldSchedulerRun(cloudBackupConfig)) {
+          startAutoBackupScheduler(runner);
+      } else {
+          stopAutoBackupScheduler();
+      }
+      return () => { stopAutoBackupScheduler(); };
+  }, [isDataLoaded, cloudBackupConfig]);
+
+  // ==== 「丢了才恢复」（用户拍板：清后台/清缓存/换机后的下一次启动自动拉回最新备份）====
+  // 只在开机第一拍跑一次（ref 挡重复）；空机判定+三道闸门都在 utils/autoRestore.ts。
+  // 必须等云同步配置本身已经拉齐（cloudBackupConfig 里可能有逐键同步下来的 GitHub
+  // 凭据），所以挂在 isDataLoaded 之后的同一拍，而不是更早的 localStorage 直读。
+  const autoRestoreCheckedRef = useRef(false);
+  useEffect(() => {
+      if (!isDataLoaded || autoRestoreCheckedRef.current) return;
+      if (!canAutoRestore(cloudBackupConfig)) return;
+      autoRestoreCheckedRef.current = true;
+      // 空机判定用 DB 实况而不是 React state（此时云同步可能已经灌完数据，state 还没刷）
+      void (async () => {
+          let characterCount = 0;
+          let messageCount = 0;
+          try {
+              await DB.streamRawStoreData('characters', () => { characterCount++; });
+              await DB.streamRawStoreData('messages', () => { messageCount++; });
+          } catch { /* store 不存在按 0 处理 */ }
+          if (!shouldAutoRestore(characterCount, messageCount, Date.now())) return;
+          try {
+              addToast('检测到本机没有数据，正在从 GitHub 备份恢复…', 'info');
+              const { listBackups, downloadBackup } = await import('../utils/githubClient');
+              const files = (await listBackups(cloudBackupConfig))
+                  .filter(f => f.status !== 'incomplete')
+                  .sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime());
+              if (files.length === 0) {
+                  markAutoRestoreFailed();
+                  addToast('GitHub 上没有可用的备份', 'info');
+                  return;
+              }
+              const blob = await downloadBackup(cloudBackupConfig, files[0], () => {});
+              if (!blob) throw new Error('备份下载失败');
+              const zipFile = new File([blob], files[0].name, { type: 'application/zip' });
+              await importSystem(zipFile);
+              markAutoRestored();
+              addToast('已自动恢复最近一次备份', 'success');
+              trackEvent('自动恢复空机数据', { result: '成功' });
+              // importSystem 已把恢复的数据写进 IndexedDB；刷一拍让所有 App 拿到一致的库
+              window.location.reload();
+          } catch (e: any) {
+              markAutoRestoreFailed();
+              addToast(`自动恢复失败: ${e?.message || '未知错误'}`, 'error');
+              trackEvent('自动恢复空机数据', { result: '失败' });
+          }
+      })();
+      // 一次性开机检查；依赖只看 isDataLoaded，计数在回调里自己读 DB
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDataLoaded, cloudBackupConfig]);
+
   const updateMemoryPalaceConfig = (updates: Partial<MemoryPalaceGlobalConfig>) => {
     const newConfig = normalizeMemoryPalaceConfig({
       ...memoryPalaceConfig,
@@ -3982,11 +4076,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   // setGroups/setUserProfile 的 Dispatch 类型与 backupSystem 的注入签名不完全一致,包一层适配。
   const importSystemSetGroups = (g: (CharacterGroup | GroupProfile)[]): void => setGroups(g as GroupProfile[]);
   const importSystemSetUserProfile = (u: UserProfile | null): void => setUserProfile(u as UserProfile);
-  const exportSystem = (mode: 'text_only' | 'media_only' | 'full') => exportSystemImpl({
+  const exportSystem = (mode: 'text_only' | 'media_only' | 'full', opts: { stripSecrets?: boolean } = {}) => exportSystemImpl({
     apiConfig, apiPresets, availableModels, realtimeConfig, memoryPalaceConfig, theme, customIcons,
     appearancePresets, characters, groups, worldbooks, novels, cloudBackupConfig, customThemes,
     userProfile, setSysOperation, addToast,
-  }, mode);
+  }, mode, opts);
   const importSystem = (fileOrJson: File | string) => importSystemImpl({
     apiConfig, apiPresets, availableModels, realtimeConfig, memoryPalaceConfig, theme, customIcons,
     appearancePresets, characters, groups, worldbooks, novels, cloudBackupConfig, customThemes,
@@ -3998,7 +4092,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     setCustomThemes, setCustomIcons, setAppearancePresets,
     setUserProfile: importSystemSetUserProfile,
   }, fileOrJson);
-  const resetSystem = () => resetSystemImpl({ addToast });
+  const resetSystem = () => {
+      // 闸门3：用户主动清数据 ≠ 丢数据。必须在 deleteDB/localStorage.clear 之前写
+      // optOut（resetSystemImpl 马上要清掉整个 localStorage），否则下次开机空机
+      // 又被自动恢复回去，等于替用户撤销他刚做的操作。
+      setAutoRestoreOptOut(true);
+      return resetSystemImpl({ addToast });
+  };
 
   const openApp = (appId: AppID) => setActiveApp(appId);
   const closeApp = () => setActiveApp(AppID.Launcher);
@@ -4123,6 +4223,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     cloudBackupToWebDAV,
     cloudRestoreFromWebDAV,
     listCloudBackups,
+    autoBackupRunner: autoBackupRunnerRef.current!,
     exportSystem,
     importSystem,
     resetSystem,

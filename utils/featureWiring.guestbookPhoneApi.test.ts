@@ -27,7 +27,8 @@ describe('查手机独立 API 接线', () => {
     });
 
     it('独立 API 会进入完整/纯文本备份并在导入时恢复', () => {
-        const context = read('context/OSContext.tsx');
+        // 3fae29e 起备份导出/导入在 utils/backupSystem.ts（从 OSContext 拆出），锚点跟着搬家
+        const context = read('utils/backupSystem.ts');
         const types = read('types.ts');
         expect(types).toContain('checkPhoneApi?: APIConfig | null');
         expect(context).toContain('checkPhoneApi: (mode === \'text_only\' || mode === \'full\') ? getCheckPhoneApi() : undefined');

@@ -141,6 +141,49 @@ const readOptionalNumber = (key: string): number | undefined => {
   return Number.isFinite(n) ? n : undefined;
 };
 
+// ==== stripSecrets（GitHub 自动备份的密钥剥离）====
+// 设计约束：
+//  1. 只认「字段名长得像凭据」——apiKey / token / secret / password / privateKey /
+//     sharedKey / authHeader 等。裸 "key" 不算（vrPresets 的 key 是风格 ID，剥了会坏数据）。
+//  2. 只清值（''），不改结构、不删字段——导入端全是 typeof/length 判断，空串 =「没配」。
+//  3. cloudBackupConfig（备份凭据本身）整段置 undefined：它不该出现在任何备份包里。
+const SECRET_FIELD_RE = /api[-_]?key|apikey|token|secret|password|passphrase|private[-_]?key|shared[-_]?key|authorization|auth[-_]?header|bearer|-auth$/i;
+
+/** 纯函数版（返回新树）：流式分片逐条剥用这个，vitest 直测。 */
+export const deepStripSecrets = <T>(value: T): T => {
+  if (Array.isArray(value)) return value.map(deepStripSecrets) as unknown as T;
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = typeof v === 'string' && SECRET_FIELD_RE.test(k) ? '' : deepStripSecrets(v);
+    }
+    return out as T;
+  }
+  return value;
+};
+
+/** 原地版：backupData 整棵树一次性剥（full 模式的 characters 等也在里面）。 */
+const deepStripSecretsInPlace = (obj: Record<string, unknown>): void => {
+  if (Array.isArray(obj)) {
+    obj.forEach(item => { if (item && typeof item === 'object') deepStripSecretsInPlace(item as Record<string, unknown>); });
+    return;
+  }
+  if (!obj || typeof obj !== 'object') return;
+  for (const k of Object.keys(obj)) {
+    const v = (obj as any)[k];
+    if (k === 'cloudBackupConfig') { (obj as any)[k] = undefined; continue; }
+    if (typeof v === 'string') {
+      if (SECRET_FIELD_RE.test(k)) (obj as any)[k] = '';
+      continue;
+    }
+    if (v && typeof v === 'object') deepStripSecretsInPlace(v);
+  }
+};
+
+/** text_only 流式分片需要逐条剥密钥的 store（情绪 API 嵌在角色上、彼方设置带独立 API）。 */
+const stripSecretsForStore = (storeName: string): boolean =>
+  storeName === 'deps.characters' || storeName === 'vr_settings';
+
 let _importStartedAt: number | null = null;
 let _importSource: string | null = null;
 
@@ -212,7 +255,20 @@ export const loadJSZip = async (): Promise<JSZipCtorLike> => {
 };
 
 // ==== 备份三实现(函数体自 OSContext 原样搬移,Provider 依赖改为 deps.*) ====
-export const exportSystemImpl = async (deps: BackupExportDeps, mode: 'text_only' | 'media_only' | 'full'): Promise<Blob> => {
+export type ExportSystemOptions = {
+  /**
+   * 剥掉备份里的密钥/凭据字段（API Key、Token、密码、Vapid 私钥、备份凭据本身等），
+   * 字段名保留、值清成空串，恢复端 typeof 判断全部兼容——「键位保留在表单」语义。
+   * 给 GitHub 自动备份用：仓库/附件是外部托管，绝不能落明文密钥。
+   */
+  stripSecrets?: boolean;
+};
+
+export const exportSystemImpl = async (
+  deps: BackupExportDeps,
+  mode: 'text_only' | 'media_only' | 'full',
+  opts: ExportSystemOptions = {},
+): Promise<Blob> => {
     try {
         deps.setSysOperation({ status: 'processing', message: '正在初始化打包引擎...', progress: 0 });
         
@@ -824,7 +880,12 @@ export const exportSystemImpl = async (deps: BackupExportDeps, mode: 'text_only'
                     // deps.characters 也走这条低内存旁路；必须在逐条写分片前规范化，
                     // 否则 text_only 会绕过下面 getAll 分支，把旧部署的绝对样板房 URL 原样带走。
                     if (storeName === 'deps.characters') normalizeCharacterRoomAssetsInPlace(item);
-                    const processedItem = noImageStores.has(storeName) ? item : stripTextOnlyMedia(item);
+                    let processedItem = noImageStores.has(storeName) ? item : stripTextOnlyMedia(item);
+                    // stripSecrets：角色身上嵌着情绪 API 的 apiKey、彼方设置带独立 API——
+                    // 流式分片不经过 backupData，必须在这条旁路上逐条剥
+                    if (opts.stripSecrets && stripSecretsForStore(storeName)) {
+                        processedItem = deepStripSecrets(processedItem);
+                    }
                     writer.appendSync([processedItem]);
                 });
                 prewrittenStores[textOnlyField] = await writer.finish();
@@ -1047,6 +1108,13 @@ export const exportSystemImpl = async (deps: BackupExportDeps, mode: 'text_only'
         // 收尾写 manifest.json 当导入契约。导入端按 manifest 把各片拼回与这里完全相同的 data
         // 对象，喂给原封不动的 importFullData——还原语义（clear-and-add / merge / 单例 /
         // media_only 补丁……）不在这里重写。详见 utils/backupFormat.ts。
+        // stripSecrets 收尾：对象字面量里的密钥字段（apiConfig.apiKey、各 *_Local 的 token、
+        // cloudBackupConfig.githubToken、pushVapid.vapidPrivateKey 等）统一在这一刀剥掉。
+        // 放在 writeV2Backup 之前，非数组的 metadata 字段全部走它落包。
+        if (opts.stripSecrets) {
+            deepStripSecretsInPlace(backupData as Record<string, unknown>);
+        }
+
         await writeV2Backup(
             zip as unknown as ZipFileWriter,
             backupData as Record<string, any>,

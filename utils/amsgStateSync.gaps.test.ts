@@ -22,6 +22,9 @@ const sliceBetween = (src: string, start: string, end: string): string => {
 
 const OS_CONTEXT = '../context/OSContext.tsx';
 const MUSIC_CONTEXT = '../context/MusicContext.tsx';
+// 3fae29e 把备份导出/导入从 OSContext 拆进 utils/backupSystem.ts——
+// 导入尾部的云端对账块跟着搬了家，源码断言要读新地址。
+const BACKUP_SYSTEM = './backupSystem.ts';
 
 // ─── 跨模块事件名（改一个字两边就对不上，静默断供）───
 
@@ -73,7 +76,7 @@ describe('utils 层直写 DB 后的内存回灌（事件名契约）', () => {
 
 describe('备份导入后跟 amsg2 云端对账', () => {
   const importTail = () =>
-    sliceBetween(read(OS_CONTEXT), '// ─── 主动消息 2.0：导入后跟云端对一次账', 'setSysOperation({ status: \'idle\', message: \'\', progress: 100 })');
+    sliceBetween(read(BACKUP_SYSTEM), '// ─── 主动消息 2.0：导入后跟云端对一次账', 'deps.setSysOperation({ status: \'idle\', message: \'\', progress: 100 })');
 
   it('没配 worker 一个请求都不发', () => {
     const tail = importTail();
