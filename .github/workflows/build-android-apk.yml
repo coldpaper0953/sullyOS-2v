@@ -1,0 +1,169 @@
+name: Build Android APK
+
+# 云端打包 SullyOS-2v 的安卓安装包：
+#   - 手动触发（Actions → Run workflow），或推送 android-* 标签时自动构建
+#   - 产物上传到对应 tag 的 GitHub Release（无标签时用日期 tag）
+# 签名用仓库 Secrets 里的固定 keystore（ANDROID_KEYSTORE_B64 等 4 个），
+# 换代升级不用卸载重装、本地数据不丢。Secrets 未配置时会回退打未签名包并失败提醒。
+on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: '版本名（如 1.0.0，纯数字点分）'
+        required: false
+        default: ''
+  push:
+    tags:
+      - 'android-v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF#refs/tags/}"        # android-v1.2.3
+            VERSION="${TAG#android-v}"
+          else
+            if [ -n "${{ inputs.version_name }}" ]; then
+              VERSION="${{ inputs.version_name }}"
+            else
+              VERSION="0.0.$(date +%-s | tail -c 5)"
+            fi
+          fi
+          CODE=$(echo "$VERSION" | awk -F. '{ printf "%d", ($1*1000000)+($2*1000)+$3 }')
+          [ "$CODE" -ge 1 ] || CODE=1
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "tag=android-v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build web bundle (capacitor mode)
+        env:
+          # 本 fork 的 APK 与上游签名不同，烧上游清单会导致「检查更新」装上
+          # 签名不符的包失败——置空让应用内更新入口隐藏，更新走本仓库 Release。
+          VITE_APK_UPDATE_MANIFEST_URL: ''
+          # fork 仓库没有上游的 Umami Variables，置空保持零统计构建。
+          VITE_UMAMI_SCRIPT_URL: ''
+          VITE_UMAMI_WEBSITE_ID: ''
+        run: |
+          pnpm run build:workers
+          pnpm exec vite build --mode capacitor
+
+      - name: Create android shell
+        run: pnpm exec cap add android
+
+      - name: Inject custom native plugins
+        run: node scripts/inject-android-plugins.mjs
+
+      - name: Set app version
+        run: |
+          cd android
+          sed -i -E "s/versionCode [0-9]+/versionCode ${{ steps.ver.outputs.code }}/" app/build.gradle
+          sed -i -E "s/versionName \"[^\"]+\"/versionName \"${{ steps.ver.outputs.version }}\"/" app/build.gradle
+          grep -n "versionCode\|versionName" app/build.gradle
+
+      - name: Restore signing keystore
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_B64" ]; then
+            echo "::error::缺少 Secrets.ANDROID_KEYSTORE_B64（固定签名 keystore 的 base64）。请先在仓库 Settings → Secrets and variables → Actions 配置。"
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_B64" | base64 -d > sullyos-release.p12
+          echo "keystore bytes: $(stat -c %s sullyos-release.p12)"
+
+      - name: Build signed APK (assembleRelease)
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          KEYSTORE_ABS="$GITHUB_WORKSPACE/sullyos-release.p12"
+          cd android
+          cat >> app/build.gradle <<EOF
+
+          // 固定签名（由 CI 注入）：让历代 APK 同签名，覆盖安装不丢数据
+          android {
+            signingConfigs {
+              sullyos {
+                storeFile file("$KEYSTORE_ABS")
+                storePassword "$ANDROID_KEYSTORE_PASSWORD"
+                keyAlias "$ANDROID_KEY_ALIAS"
+                keyPassword "$ANDROID_KEY_PASSWORD"
+                storeType "PKCS12"
+                enableV1Signing true
+                enableV2Signing true
+              }
+            }
+            buildTypes {
+              release {
+                signingConfig signingConfigs.sullyos
+              }
+            }
+          }
+          EOF
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Verify APK
+        run: |
+          APK="android/app/build/outputs/apk/release/app-release.apk"
+          ls -la "$APK"
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "$APK" | head -20
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SullyOS-2v-Android
+          path: android/app/build/outputs/apk/release/app-release.apk
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK="android/app/build/outputs/apk/release/app-release.apk"
+          OUT="SullyOS-2v-Android-v${{ steps.ver.outputs.version }}.apk"
+          cp "$APK" "$OUT"
+          SHA256=$(sha256sum "$OUT" | awk '{print $1}')
+          SIZE=$(stat -c %s "$OUT")
+          echo "sha256=$SHA256 size=$SIZE"
+          if gh release view "${{ steps.ver.outputs.tag }}" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "${{ steps.ver.outputs.tag }}" "$OUT" --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "${{ steps.ver.outputs.tag }}" "$OUT" \
+              --title "SullyOS-2v Android v${{ steps.ver.outputs.version }}" \
+              --notes "云端自动打包。SHA-256: \`$SHA256\`（$SIZE 字节）。直接下载 apk 安装；更新时覆盖安装即可，数据不丢。" \
+              -R "$GITHUB_REPOSITORY"
+          fi
