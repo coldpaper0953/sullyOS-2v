@@ -37,17 +37,14 @@ for (const f of pluginFiles) {
   console.log(`[inject] ${f} -> app/src/main/java/${appIdPath}/plugins/`);
 }
 
-// 包名声明对齐壳的 applicationId
+// 包名声明对齐壳的 applicationId（模板里是 placeholder，必须替换成真包名）
 for (const f of pluginFiles) {
   const p = join(targetPkgDir, f);
   let s = readFileSync(p, 'utf8');
-  const declared = s.match(/^package\s+([\w.]+)/m);
   const wanted = `${cfg.appId}.plugins`;
-  if (declared && declared[1] !== wanted) {
-    s = s.replace(/^package\s+[\w.]+/m, `package ${wanted}`);
-    writeFileSync(p, s);
-    console.log(`[inject] ${f}: package 改为 ${wanted}`);
-  }
+  s = s.replace(/^package\s+[\w.]+/m, `package ${wanted}`);
+  writeFileSync(p, s);
+  console.log(`[inject] ${f}: package 改为 ${wanted}`);
 }
 
 // ---- 2. AndroidManifest.xml 补权限 + FileProvider ----
@@ -105,4 +102,18 @@ if (!gradle.includes('androidx.core:core')) {
 }
 writeFileSync(gradlePath, gradle);
 
+// ---- 4. 完整性自检：源文件必须在壳的源码集里，包名必须已替换 ----
+for (const f of pluginFiles) {
+  const p = join(targetPkgDir, f);
+  const s = readFileSync(p, 'utf8');
+  if (!s.includes(`package ${cfg.appId}.plugins`)) {
+    console.error(`[inject] ${f}: package 行没有替换成 ${cfg.appId}.plugins —— 模板文件坏了`);
+    process.exit(1);
+  }
+}
+const ktCount = readdirSync(targetPkgDir).filter((f) => f.endsWith('.kt')).length;
+if (ktCount !== pluginFiles.length) {
+  console.error(`[inject] 目标目录 .kt 数量不符（${ktCount} vs ${pluginFiles.length}）`);
+  process.exit(1);
+}
 console.log('[inject] 完成。');

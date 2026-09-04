@@ -1,3 +1,6 @@
+// package 由 scripts/inject-android-plugins.mjs 按 capacitor appId 注入
+package placeholder.injected.by.ci
+
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
