@@ -93,7 +93,10 @@ export const uploadBackup = async (
 
 export const listBackups = async (_config: CloudBackupConfig): Promise<CloudBackupFile[]> => {
     const files = await backendFetch<CloudBackupFile[]>('/v1/backup/history?limit=20');
-    return files;
+    // importSystem 用 name.endsWith('.zip') 分流 zip/JSON；github 线的 name 天生带后缀，
+    // backend 的 commit 描述没有——这里补上，否则自动恢复会把它当 JSON 解析然后报
+    // 「无效的文件格式」（E2E 空机恢复抓到过）。
+    return files.map((f) => ({ ...f, name: f.name.endsWith('.zip') ? f.name : `${f.name}.zip` }));
 };
 
 export const downloadBackup = async (

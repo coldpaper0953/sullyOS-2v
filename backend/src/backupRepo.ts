@@ -28,13 +28,16 @@ export class BackupValidationError extends Error {
   }
 }
 
-/** zip-slip 防护：拒绝绝对路径、盘符、反斜杠、`..` 段与空段。 */
+/** zip-slip 防护：拒绝绝对路径、盘符、反斜杠、`..` 段与空段。目录条目（末尾 /）放行，由写树时跳过。 */
 export function isSafeEntryName(name: string): boolean {
   if (!name || name.length > 255) return false;
   if (name.includes('\\') || name.includes('\0')) return false;
   if (name.startsWith('/') || /^[a-zA-Z]:/.test(name)) return false;
+  const isDir = name.endsWith('/');
   const parts = name.split('/');
-  return parts.every((part) => part.length > 0 && part !== '..');
+  // 目录条目形如 "stores/"，split 后末尾是空段——只允许末尾这一个空段
+  if (isDir) parts.pop();
+  return parts.length > 0 && parts.every((part) => part.length > 0 && part !== '..');
 }
 
 /** 递归扫结构化 JSON：密钥样式字段名带非空字符串值 = 问题。数组里逐项下钻。 */
@@ -113,12 +116,14 @@ export async function writeBackupTree(
   };
 
   const existing = await walk(backupDir).catch(() => [] as string[]);
-  const wanted = new Set(Object.keys(entries));
+  // 目录条目（末尾 /）不落盘也不算文件数；existing walk 只出文件，对齐口径
+  const wanted = new Set(Object.keys(entries).filter((name) => !name.endsWith('/')));
   for (const stale of existing) {
     if (!wanted.has(stale)) await fs.rm(path.join(backupDir, ...stale.split('/')), { force: true });
   }
 
   for (const [name, bytes] of Object.entries(entries)) {
+    if (name.endsWith('/')) continue;
     const target = path.join(backupDir, ...name.split('/'));
     await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.writeFile(target, bytes);

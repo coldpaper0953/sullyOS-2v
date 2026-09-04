@@ -622,6 +622,9 @@ export const exportSystemImpl = async (
                     const key = localStorage.key(i);
                     if (!key) continue;
                     if (key.startsWith('sullyos_')) {
+                        // 红线：sullyos_backend_chat_v1（自主后端配对配置）里含明文 APP Token，
+                        // 密钥只走 s 表逐键加密同步，绝不进备份包（E2E 验收抓到过整段裸带）。
+                        if (key === 'sullyos_backend_chat_v1') continue;
                         flags[key] = localStorage.getItem(key) || '';
                     }
                 }

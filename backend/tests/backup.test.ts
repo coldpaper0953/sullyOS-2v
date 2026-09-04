@@ -184,6 +184,26 @@ describe.skipIf(!gitAvailable)('备份仓库通道 /v1/backup/*（真 git + 临�
     expect(Object.keys(entries)).toContain('stores/messages.000.json');
   });
 
+  it('真实前端导出的 zip 带目录条目（stores/、assets/）→ 放行且不落盘（E2E 抓到过的误杀）', async () => {
+    const zip = buildZip({
+      'manifest.json': { formatVersion: 3, mode: 'text_only', stores: { messages: { parts: 1, count: 1 } } },
+      'metadata.json': { version: 'test' },
+      'stores/': new Uint8Array(0),
+      'assets/': new Uint8Array(0),
+      'stores/messages.000.json': [{ id: 'm1', content: 'hi' }],
+    });
+    const res = await app.inject({
+      method: 'POST', url: '/v1/backup/upload', headers: { ...auth, 'content-type': 'application/zip' }, payload: zip,
+    });
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data.fileCount).toBe(3); // 目录条目不算文件
+    // 目录条目没有变成名字叫 "stores" 的空文件
+    const st = await fs.stat(path.join(dir, 'stores'));
+    expect(st.isDirectory()).toBe(true);
+    await expect(fs.readFile(path.join(dir, 'assets'))).rejects.toThrow();
+  });
+
   it('空 body → 400', async () => {
     const res = await app.inject({
       method: 'POST', url: '/v1/backup/upload', headers: { ...auth, 'content-type': 'application/zip' }, payload: Buffer.alloc(0),

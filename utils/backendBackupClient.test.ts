@@ -138,7 +138,7 @@ describe('listBackups / downloadBackup / deleteBackup / cleanupOldBackups', () =
         const { listBackups } = await import('./backendBackupClient');
         const files = await listBackups({} as any);
         expect(files).toHaveLength(1);
-        expect(files[0].name).toContain('abcd1234');
+        expect(files[0].name).toBe('backup 2026-09-04 (abcd1234).zip'); // 自动恢复的 zip 分流靠后缀
         expect(files[0].status).toBe('ready');
     });
 
