@@ -10,6 +10,7 @@ import {
     setAutoBackupEnabled,
     setAutoBackupInterval,
     shouldSchedulerRun,
+    isAutoBackupRunning,
     startAutoBackupScheduler,
     stopAutoBackupScheduler,
     type KvLike,
@@ -23,7 +24,17 @@ beforeEach(() => {
         removeEventListener: () => {},
     };
     (globalThis as any).localStorage?.clear?.();
+    // vitest 按文件级作用域缓存模块 → 上个用例留下的模块级 uploadInFlight/session
+    // 会泄进这个用例（调度器状态是模块单例）。vi.resetModules 后重新 import 一份干净的。
+    vi.resetModules();
 });
+
+// beforeEach 的 resetModules 之后，本文件顶部的 import 绑定仍指向旧实例——
+// 调度器类用例统一通过 loadFresh() 拿重置后的模块。
+const loadFresh = async () => {
+    const mod = await import('./githubAutoBackup');
+    return mod as typeof import('./githubAutoBackup');
+};
 
 const memKv = (): { kv: KvLike; map: Map<string, string> } => {
     const map = new Map<string, string>();
@@ -90,9 +101,8 @@ describe('调度器单飞（fake timers）', () => {
     it('首次开 → 立刻跑一次；跑完按新锚点排下一个；期间的重叠触发被丢弃', async () => {
         vi.useFakeTimers();
         try {
-            const { kv } = memKv();
-            const realKv = kv;
-            // 用注入 kv 的方式绕不开调度器内部直读 localStorage，这里直接清空全局再灌开关
+            const { startAutoBackupScheduler, stopAutoBackupScheduler } = await loadFresh();
+            // 调度器内部直读全局 localStorage，直接清空全局再灌开关
             const gkv = (globalThis as any).localStorage;
             gkv.setItem('sullyos_github_auto_backup_v1', JSON.stringify({ enabled: true, intervalMs: 3600_000, lastAutoBackupAt: 0 }));
 
@@ -121,7 +131,48 @@ describe('调度器单飞（fake timers）', () => {
             expect(calls).toBe(2);
 
             stopAutoBackupScheduler();
-            void realKv;
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('调度器中途重启（effect 重跑换 session）绝不并发第二个备份（线上双 release 教训）', async () => {
+        vi.useFakeTimers();
+        try {
+            const { startAutoBackupScheduler, stopAutoBackupScheduler, isAutoBackupRunning } = await loadFresh();
+            const gkv = (globalThis as any).localStorage;
+            gkv.setItem('sullyos_github_auto_backup_v1', JSON.stringify({ enabled: true, intervalMs: 3600_000, lastAutoBackupAt: 0 }));
+            let clock = 1_000_000;
+            const now = vi.fn(() => clock);
+
+            let calls = 0;
+            let resolveUpload: ((v: { ok: boolean }) => void) | null = null;
+            const runner = () => {
+                calls++;
+                return new Promise<{ ok: boolean }>(res => { resolveUpload = res; });
+            };
+
+            startAutoBackupScheduler(runner, now);
+            await vi.advanceTimersByTimeAsync(10);
+            expect(calls).toBe(1); // 首轮：lastAutoBackupAt=0 立刻跑
+            expect(isAutoBackupRunning()).toBe(true);
+
+            // 上传中途调度器被重启（React effect 因 cloudBackupConfig 变化重跑 stop+start）
+            startAutoBackupScheduler(runner, now);
+            clock += 5000;
+            await vi.advanceTimersByTimeAsync(20);
+            // 新 session 的 delay=0 timer 触发，但 uploadInFlight 挡住 → 只许还是 1 次
+            expect(calls).toBe(1);
+
+            resolveUpload!({ ok: true });
+            await vi.advanceTimersByTimeAsync(10);
+            expect(calls).toBe(1); // 成功后按新锚点排下一个，不在眼前
+            expect(isAutoBackupRunning()).toBe(false);
+
+            clock += 3600_000;
+            await vi.advanceTimersByTimeAsync(3600_000);
+            expect(calls).toBe(2); // 一个周期后正常第二轮
+            stopAutoBackupScheduler();
         } finally {
             vi.useRealTimers();
         }
@@ -130,6 +181,7 @@ describe('调度器单飞（fake timers）', () => {
     it('失败不推进锚点，也不许 back-to-back：从现在起等一个完整 interval 再试', async () => {
         vi.useFakeTimers();
         try {
+            const { startAutoBackupScheduler, stopAutoBackupScheduler } = await loadFresh();
             const gkv = (globalThis as any).localStorage;
             const t0 = 5_000_000;
             gkv.setItem('sullyos_github_auto_backup_v1', JSON.stringify({ enabled: true, intervalMs: 3600_000, lastAutoBackupAt: t0 }));
@@ -154,7 +206,8 @@ describe('调度器单飞（fake timers）', () => {
 });
 
 describe('setAutoBackupEnabled / setAutoBackupInterval', () => {
-    it('改间隔立即 clamp 并落库', () => {
+    it('改间隔立即 clamp 并落库', async () => {
+        const { setAutoBackupInterval, setAutoBackupEnabled, stopAutoBackupScheduler } = await loadFresh();
         const gkv = (globalThis as any).localStorage;
         const next = setAutoBackupInterval(1000, async () => ({ ok: true }), () => 1); // 1 秒会被 clamp 到 10 分钟下限
         expect(next.intervalMs).toBe(AUTO_BACKUP_MIN_INTERVAL_MS);

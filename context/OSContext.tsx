@@ -3192,8 +3192,16 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const updateRealtimeConfig = (updates: Partial<RealtimeConfig>) => { const newConfig = { ...realtimeConfig, ...updates }; setRealtimeConfig(newConfig); localStorage.setItem('os_realtime_config', JSON.stringify(newConfig)); };
 
   // Cloud Backup functions
+  // 最新配置 ref：自动备份的 runner 是 useRef 一次性创建（见下），闭包里不能用
+  // 渲染态 cloudBackupConfig——会冻结在首渲染，用户后来换 token/仓库 runner 还拿旧的；
+  // 更糟的是旧的 updateCloudBackupConfig 做 {...旧config,...updates} 展开，会把
+  // 新配置整个顶回去（线上教训：双 release 事件暴露的闭包过期链）。所有要跨渲染
+  // 存活的调用点一律走 ref。
+  const cloudBackupConfigRef = useRef(cloudBackupConfig);
+  cloudBackupConfigRef.current = cloudBackupConfig;
   const updateCloudBackupConfig = (updates: Partial<CloudBackupConfig>) => {
-      const newConfig = { ...cloudBackupConfig, ...updates };
+      const newConfig = { ...cloudBackupConfigRef.current, ...updates };
+      cloudBackupConfigRef.current = newConfig;
       setCloudBackupConfig(newConfig);
       localStorage.setItem('os_cloud_backup_config', JSON.stringify(newConfig));
   };
@@ -3277,24 +3285,30 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   // ==== GitHub 自动备份（用户 2026-09-04 拍板：每 4 小时一次，密钥不进包）====
   // 调度骨架在 utils/githubAutoBackup.ts（仿 obsidian-git：补差算法/单飞/成功才记时间戳）。
-  // runner 用 void 包一层：自动备份的异常已经由调度器吞掉记结果，这里不许把 reject
-  // 漏给外层（比如跑在一个 effect 的 Promise 链里）触发未处理拒绝告警。
+  // runner 用 useRef 固定身份（防 effect 重启 timer），**所有会变的数据一律走 ref**：
+  // cloudBackupConfigRef（上面定义）、exportSystemRef（下面挂）——闭包里直接用渲染态
+  // 会冻结在首渲染，换 token/改配置后 runner 还拿旧值（线上实测教训）。
+  const exportSystemRef = useRef<((mode: 'text_only' | 'media_only' | 'full', opts?: { stripSecrets?: boolean }) => Promise<Blob>) | null>(null);
   const autoBackupRunnerRef = useRef<(() => Promise<{ ok: boolean; error?: string }>) | null>(null);
   if (autoBackupRunnerRef.current === null) {
       autoBackupRunnerRef.current = async () => {
           try {
               // 静默模式：不转 setSysOperation/不上 toast——半夜定时跑不能打断用户正在
               // 看的进度条；失败也只在 console 留痕（下个周期会按原锚点补跑）。
-              const blob = await exportSystem('text_only', { stripSecrets: true });
-              const { uploadBackup, cleanupOldBackups: cleanup } = await loadBackupProvider();
+              const cfg = cloudBackupConfigRef.current;
+              const blob = await exportSystemRef.current!('text_only', { stripSecrets: true });
+              if (!blob || blob.size === 0) return { ok: false, error: '导出为空' };
+              const client = cfg.provider === 'github'
+                  ? await import('../utils/githubClient')
+                  : await import('../utils/webdavClient');
               const filename = `Sully_AutoBackup_${Date.now()}.zip`;
-              const result = await uploadBackup(cloudBackupConfig, blob, filename, () => {});
+              const result = await client.uploadBackup(cfg, blob, filename, () => {});
               if (!result.ok) {
                   console.warn('[自动备份] 上传失败:', result.message);
                   return { ok: false, error: result.message };
               }
               updateCloudBackupConfig({ lastBackupTime: Date.now(), lastBackupSize: blob.size });
-              await cleanup(cloudBackupConfig, 5).catch(() => {});
+              await client.cleanupOldBackups(cfg, 5).catch(() => {});
               trackEvent('自动备份到 GitHub', { result: '成功', size: blob.size });
               return { ok: true };
           } catch (e: any) {
@@ -4081,6 +4095,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     appearancePresets, characters, groups, worldbooks, novels, cloudBackupConfig, customThemes,
     userProfile, setSysOperation, addToast,
   }, mode, opts);
+  // 自动备份 runner（跨渲染存活）通过 ref 拿最新的导出闭包。
+  // useRef 的 current 本可写，但上面声明时为了类型简洁带的是初始化 null——
+  // React 19 的 useRef 类型推导会把 current 标成只读，这里用 MutableRefObject 兼容写。
+  (exportSystemRef as { current: ((mode: 'text_only' | 'media_only' | 'full', opts?: { stripSecrets?: boolean }) => Promise<Blob>) | null }).current = exportSystem;
   const importSystem = (fileOrJson: File | string) => importSystemImpl({
     apiConfig, apiPresets, availableModels, realtimeConfig, memoryPalaceConfig, theme, customIcons,
     appearancePresets, characters, groups, worldbooks, novels, cloudBackupConfig, customThemes,

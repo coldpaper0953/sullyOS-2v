@@ -117,6 +117,15 @@ interface SchedulerSession {
 /** 模块级唯一会话（obsidian-git 同款单飞：同一时刻最多一个调度循环）。 */
 let session: SchedulerSession | null = null;
 
+/**
+ * 进程级单飞：正在上传时就算调度器被重启（React effect 重跑 → stop/start 换 session），
+ * 也绝不放行第二个备份。obsidian-git 的 promiseQueue 是模块级单例，同样跨重启存活；
+ * SullyOS 的调度器会因 cloudBackupConfig 变化而重建，必须把「在跑」这个事实放到 session
+ * 外面，否则重启后的新 session running=false，正在上传的那轮会被并发复制一份
+ * （线上实测教训：同一次刷新产生两个相隔 10 秒的备份 release）。
+ */
+let uploadInFlight: Promise<{ ok: boolean; error?: string }> | null = null;
+
 const clearTimer = (): void => {
     if (session && session.timerId !== null && session.timerId !== undefined) {
         clearTimeout(session.timerId);
@@ -124,27 +133,33 @@ const clearTimer = (): void => {
     if (session) session.timerId = null;
 };
 
-/** 跑一次备份。单飞挡重入：running 时直接返回（obsidian-git 的 promiseQueue 等价物——
- *  本项目自动备份没有「排队连发」的正当场景，直接丢弃重叠触发更安全）。
- *  返回是否成功，重排逻辑按结果分岔。 */
+/** 跑一次备份。进程级单飞：还在上传就直接返回、**不回调 onDone**——在跑的那一轮
+ *  跑完会自己按「此刻」的 session 重排 timer（可能已被 stop/start 换过），这里若再
+ *  按成功分支重排，会用还没推进的旧锚点算出 delay=0，形成 setTimeout(0) 热循环。 */
 const runOnce = async (runner: AutoBackupRunner, now: () => number, onDone?: (ok: boolean) => void): Promise<void> => {
-    if (!session || session.running) {
-        onDone?.(true); // 已在跑：视为本轮已交差，重排走成功分支（锚点会被真正那次写）
+    if (uploadInFlight) return;
+    if (!session) {
+        onDone?.(false);
         return;
     }
     session.running = true;
-    let ok = false;
-    try {
-        const result = await runner();
-        ok = result.ok;
-    } catch { ok = false; }
-    session.running = false;
-    if (ok) {
+    uploadInFlight = (async () => {
+        try {
+            return await runner();
+        } catch (e: any) {
+            return { ok: false, error: e?.message || String(e) };
+        } finally {
+            uploadInFlight = null;
+            if (session) session.running = false;
+        }
+    })();
+    const result = await uploadInFlight;
+    if (result.ok) {
         // 时间戳只在成功时写（obsidian-git 铁律）；失败不推进锚点
         const st = readAutoBackupState();
         writeAutoBackupState({ ...st, lastAutoBackupAt: now() });
     }
-    onDone?.(ok);
+    onDone?.(result.ok);
 };
 
 /** 备份结束后的重排：
@@ -153,7 +168,7 @@ const runOnce = async (runner: AutoBackupRunner, now: () => number, onDone?: (ok
  *    死循环连砸 GitHub。所以失败后从现在起等一个完整 interval 再试一次
  *    （obsidian-git：失败也照样按 interval 排，绝不 back-to-back）。 */
 const handleDoneAndReschedule = (ok: boolean, runner: AutoBackupRunner, now: () => number): void => {
-    if (!session) return;
+    if (!session) return; // 期间调度器被拆掉（关开关/断连）：不重排，跑完的那轮自然收尾
     if (ok) {
         scheduleNext(runner, now);
         return;
@@ -214,8 +229,9 @@ export function stopAutoBackupScheduler(): void {
     session = null;
 }
 
-/** 当前是否有个备份正在跑（避免设置页在跑的过程中让用户重复点「立即备份」）。 */
-export const isAutoBackupRunning = (): boolean => session?.running === true;
+/** 当前是否有个备份正在上传（避免设置页在跑的过程中让用户重复点「立即备份」）。
+ *  看进程级 uploadInFlight 而不是 session——上传跨调度器重启存活。 */
+export const isAutoBackupRunning = (): boolean => uploadInFlight !== null;
 
 // ---- 用户操作（设置页调用）----
 
