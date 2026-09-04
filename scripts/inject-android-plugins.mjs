@@ -90,10 +90,32 @@ const filePaths = `<?xml version="1.0" encoding="utf-8"?>
 writeFileSync(join(xmlDir, 'file_paths.xml'), filePaths);
 console.log('[inject] res/xml/file_paths.xml');
 
-// ---- 3. app/build.gradle 补 androidx.core（ContextCompat.registerReceiver 用） ----
+// ---- 3. app/build.gradle：加 Kotlin 插件 + androidx.core ----
+// cap add android 的模板只有 com.android.application——没有 kotlin-android 插件，
+// 放进去的 .kt 根本不参与编译（v1.0.0/v1.0.1 两次构建插件类没进 dex 的根因）。
 const gradlePath = join(androidRoot, 'app', 'build.gradle');
 let gradle = readFileSync(gradlePath, 'utf8');
-if (!gradle.includes('androidx.core:core')) {
+if (!gradle.includes('kotlin-android')) {
+  gradle = gradle.replace(
+    /apply plugin: 'com\.android\.application'/,
+    `apply plugin: 'com.android.application'\napply plugin: 'kotlin-android'`,
+  );
+  console.log('[inject] build.gradle: +kotlin-android');
+}
+if (!gradle.includes('kotlin-gradle-plugin')) {
+  // 根 build.gradle 要有 kotlin classpath 才能 apply kotlin-android
+  const rootGradlePath = join(androidRoot, 'build.gradle');
+  let rootGradle = readFileSync(rootGradlePath, 'utf8');
+  if (!rootGradle.includes('kotlin-gradle-plugin')) {
+    rootGradle = rootGradle.replace(
+      /(dependencies\s*\{)/,
+      `$1\n        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.10"`,
+    );
+    writeFileSync(rootGradlePath, rootGradle);
+    console.log('[inject] root build.gradle: +kotlin classpath');
+  }
+}
+if (!gradle.includes('androidx.core:core:')) {
   gradle = gradle.replace(
     /(dependencies\s*\{)/,
     `$1\n    implementation "androidx.core:core:1.13.1"`,
