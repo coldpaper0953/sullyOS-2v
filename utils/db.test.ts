@@ -97,6 +97,33 @@ describe('DB.deleteDB', () => {
   });
 });
 
+// deps. 前缀的虚拟 store 名映射: 备份系统的 storesToProcess 用 'deps.characters' 表示
+// 「随 React state 走的 store」, 但 IndexedDB 里只有裸名。修复前 getRawStoreData /
+// streamRawStoreData 的 contains 检查静默 return 0 条 —— 线上实测 text_only 备份的
+// characters/groups/worldbooks/novels/songs 分片全空, 不报任何错(自动备份抓出来的)。
+describe('deps. 虚拟 store 名映射(备份导出旁路)', () => {
+  it('getRawStreamData 剥掉 deps. 前缀读真实 store', async () => {
+    await DB.deleteDB(); // 复位, 下面从头建 v74 库
+    await DB.saveCharacter({ id: 'char-deps-test', name: '测试角色' } as any);
+    // 裸名与虚拟名读到的必须是同一份数据
+    const bare = await DB.getRawStoreData('characters');
+    const virtual = await DB.getRawStoreData('deps.characters');
+    expect(bare.length).toBe(1);
+    expect(virtual.length).toBe(1);
+    expect((virtual[0] as any).id).toBe('char-deps-test');
+
+    // 流式旁路同款
+    const streamed: any[] = [];
+    await DB.streamRawStoreData('deps.characters', item => streamed.push(item));
+    expect(streamed.length).toBe(1);
+  });
+
+  it('deps. 前缀打在不存在的 store 上仍静默空返回(不抛错)', async () => {
+    await expect(DB.getRawStoreData('deps.no_such_store')).resolves.toEqual([]);
+    await expect(DB.streamRawStoreData('deps.no_such_store', () => {})).resolves.toBeUndefined();
+  });
+});
+
 // blocked-then-unblocked 连接泄漏: onblocked 先 reject, 但底层 open request 还活着 ——
 // 占用方关闭后 onsuccess 仍会触发。修复前那条迟到的连接没人持有也没缓存, 开着会 block
 // 后续升级/删库; 修复后 settled 守卫让它被 close。这里复现整条链路, 用「事后 deleteDatabase

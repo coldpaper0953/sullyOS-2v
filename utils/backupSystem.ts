@@ -478,8 +478,16 @@ export const exportSystemImpl = async (
             version: 3,
             apiConfig: (mode === 'text_only' || mode === 'full') ? deps.apiConfig : undefined,
             checkPhoneApi: (mode === 'text_only' || mode === 'full') ? getCheckPhoneApi() : undefined,
-            apiPresets: (mode === 'text_only' || mode === 'full') ? deps.apiPresets : undefined,
-            availableModels: (mode === 'text_only' || mode === 'full') ? deps.availableModels : undefined,
+            // 预设/模型列表：React state 在自动备份触发的那一拍可能还没载入（开机流程里
+            // setState 与 isDataLoaded 的时序没有契约保证，线上实测首份自动备份包计 0 条）。
+            // localStorage 是持久化真相源，state 空而 LS 有值时用 LS 兜底——这正是
+            // cloudSync 修「上传包少字段」的同款思路，别让备份包看 state 脸色。
+            apiPresets: (mode === 'text_only' || mode === 'full') ? ((deps.apiPresets && deps.apiPresets.length > 0)
+                ? deps.apiPresets
+                : (() => { try { const s = localStorage.getItem('os_api_presets'); const parsed = s ? JSON.parse(s) as ApiPreset[] : null; return Array.isArray(parsed) && parsed.length > 0 ? parsed : deps.apiPresets; } catch { return deps.apiPresets; } })()) : undefined,
+            availableModels: (mode === 'text_only' || mode === 'full') ? ((deps.availableModels && deps.availableModels.length > 0)
+                ? deps.availableModels
+                : (() => { try { const s = localStorage.getItem('os_available_models'); const parsed = s ? JSON.parse(s) as string[] : null; return Array.isArray(parsed) && parsed.length > 0 ? parsed : deps.availableModels; } catch { return deps.availableModels; } })()) : undefined,
             realtimeConfig: (mode === 'text_only' || mode === 'full') ? deps.realtimeConfig : undefined,
             memoryPalaceConfig: (mode === 'text_only' || mode === 'full') ? deps.memoryPalaceConfig : undefined,
             theme: cloneForInPlace(deps.theme), // Include deps.theme in all modes (text/media)
@@ -866,6 +874,7 @@ export const exportSystemImpl = async (
 
             // 纯文字模式的普通数组 store：逐条剥图后立刻写分片。这里 continue 后不会再把
             // processedData 挂到 backupData，因此已处理的整表不会一直留到最终压缩阶段。
+            // deps. 前缀的虚拟 store 名在 DB 层（streamRawStoreData/getRawStoreData）剥。
             const textOnlyField = mode === 'text_only' ? textOnlyFieldByStore[storeName] : undefined;
             if (textOnlyField) {
                 const writer = createV2ArrayFieldWriter(
@@ -877,8 +886,6 @@ export const exportSystemImpl = async (
                     },
                 );
                 await DB.streamRawStoreData(storeName, (item) => {
-                    // deps.characters 也走这条低内存旁路；必须在逐条写分片前规范化，
-                    // 否则 text_only 会绕过下面 getAll 分支，把旧部署的绝对样板房 URL 原样带走。
                     if (storeName === 'deps.characters') normalizeCharacterRoomAssetsInPlace(item);
                     let processedItem = noImageStores.has(storeName) ? item : stripTextOnlyMedia(item);
                     // stripSecrets：角色身上嵌着情绪 API 的 apiKey、彼方设置带独立 API——

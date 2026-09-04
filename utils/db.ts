@@ -3122,10 +3122,15 @@ export const DB = {
 
   getRawStoreData: async (storeName: string): Promise<any[]> => {
       const db = await openDB();
-      if (!db.objectStoreNames.contains(storeName)) return [];
+      // 备份系统的 storesToProcess 用「deps.characters」这类带前缀的虚拟名表示「随
+      // React state 走的 store」；IndexedDB 里没有这个 store 名——不剥前缀时 contains
+      // 检查不过、静默返回 []，full/media 模式的角色/群/世界书/小说/歌曲全变 0 条
+      // 且不报任何错（线上自动备份实测：text_only 的 characters 分片为空）。
+      const realName = storeName.startsWith('deps.') ? storeName.slice(5) : storeName;
+      if (!db.objectStoreNames.contains(realName)) return [];
       return new Promise((resolve, reject) => {
-          const transaction = db.transaction(storeName, 'readonly');
-          const store = transaction.objectStore(storeName);
+          const transaction = db.transaction(realName, 'readonly');
+          const store = transaction.objectStore(realName);
           const request = store.getAll();
           request.onsuccess = () => resolve(request.result || []);
           request.onerror = () => reject(request.error);
@@ -3141,10 +3146,12 @@ export const DB = {
       onItem: (item: any) => void,
   ): Promise<void> => {
       const db = await openDB();
-      if (!db.objectStoreNames.contains(storeName)) return;
+      // 同 getRawStoreData：deps. 前缀是备份系统里的虚拟 store 名，这里剥掉再查
+      const realName = storeName.startsWith('deps.') ? storeName.slice(5) : storeName;
+      if (!db.objectStoreNames.contains(realName)) return;
       return new Promise((resolve, reject) => {
-          const tx = db.transaction(storeName, 'readonly');
-          const req = tx.objectStore(storeName).openCursor();
+          const tx = db.transaction(realName, 'readonly');
+          const req = tx.objectStore(realName).openCursor();
           let callbackError: unknown;
 
           req.onsuccess = () => {
