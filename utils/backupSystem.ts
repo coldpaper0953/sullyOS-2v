@@ -1522,11 +1522,46 @@ export const importSystemImpl = async (deps: BackupImportDeps, fileOrJson: File 
             await restoreAssetsInPlace(data.theme, '系统主题');
             await deps.updateTheme(data.theme);
         }
-        if (data.apiConfig) deps.updateApiConfig(data.apiConfig);
+        if (data.apiConfig) {
+            // GitHub 自动备份等管道导出的包是**脱敏**的（apiKey 置空）。导入这种包时绝不能
+            // 拿空 key 覆盖本机已填好的真实凭据——实测自动恢复「清空设备→拉回备份」后
+            // 表单 key 被抹空。updateApiConfig 是 merge 语义，这里干脆不传 apiKey 这个键：
+            // 备份带了非空 key 才覆盖，脱敏空值保留本机现值。
+            const { apiKey: incomingKey, ...restConfig } = data.apiConfig;
+            deps.updateApiConfig(incomingKey?.trim() ? data.apiConfig : restConfig);
+        }
         if (data.checkPhoneApi !== undefined) setCheckPhoneApi(data.checkPhoneApi ?? null);
         if (data.availableModels) deps.saveModels(data.availableModels);
-        if (data.apiPresets) deps.savePresets(data.apiPresets);
-        if (data.realtimeConfig) deps.updateRealtimeConfig(data.realtimeConfig); // 恢复实时感知配置
+        if (data.apiPresets) {
+            // 预设的 key 同样被脱敏导出成空串，而 savePresets 是整组替换——不合并的话
+            // 导入一次就把「key 只填在预设里」的本机凭据全部抹空。同 id 对齐：备份里
+            // 非空的照常恢复，空 key 的预设保留本机已填的那把。
+            const localKeyById = new Map(
+                (deps.apiPresets || [])
+                    .filter(p => (p?.config?.apiKey || '').trim())
+                    .map(p => [p.id, p.config.apiKey] as const),
+            );
+            const mergedPresets = data.apiPresets.map((p: ApiPreset) => {
+                if ((p?.config?.apiKey || '').trim()) return p;
+                const localKey = localKeyById.get(p?.id);
+                return localKey ? { ...p, config: { ...p.config, apiKey: localKey } } : p;
+            });
+            deps.savePresets(mergedPresets);
+        }
+        if (data.realtimeConfig) {
+            // 同 apiConfig：脱敏导出把 weatherApiKey / newsApiKey / notionApiKey 等
+            // 置空，导入时逐键保留本机已填的值，只恢复非密钥的配置项（开关/城市/平台表）。
+            const mergedRealtime: Record<string, unknown> = { ...data.realtimeConfig };
+            const localRealtime = (deps.realtimeConfig ?? {}) as unknown as Record<string, unknown>;
+            for (const k of Object.keys(mergedRealtime)) {
+                if (!/api[-_]?key|token|secret|authorization|auth[-_]?header/i.test(k)) continue;
+                const incoming = mergedRealtime[k];
+                if (typeof incoming !== 'string' || incoming.trim()) continue; // 带真实值才覆盖
+                const localVal = localRealtime[k];
+                if (typeof localVal === 'string' && localVal.trim()) mergedRealtime[k] = localVal;
+            }
+            deps.updateRealtimeConfig(mergedRealtime as unknown as RealtimeConfig); // 恢复实时感知配置
+        }
         if (data.memoryPalaceConfig) deps.updateMemoryPalaceConfig(data.memoryPalaceConfig); // 恢复记忆宫殿全局配置
 
         if (data.customIcons !== undefined || data.appearancePresets !== undefined) {
