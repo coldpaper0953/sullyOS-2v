@@ -565,6 +565,10 @@ const Settings: React.FC = () => {
   const [visionModelFilter, setVisionModelFilter] = useState('');
   const [showExportModal, setShowExportModal] = useState(false); // Used for completion now
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  // 格式化时是否连远端备份一起清（勾上才动云端，默认只清本机）
+  const [resetWipeCloud, setResetWipeCloud] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetProgress, setResetProgress] = useState('');
   const [showPresetModal, setShowPresetModal] = useState(false);
   const [showApiCallLog, setShowApiCallLog] = useState(false);
   const [showRealtimeModal, setShowRealtimeModal] = useState(false);
@@ -1815,9 +1819,49 @@ const Settings: React.FC = () => {
       }
   };
 
-  const confirmReset = () => {
-      resetSystem();
-      setShowResetConfirm(false);
+  const confirmReset = async () => {
+      // 只清本机：老行为，直接格式化
+      if (!resetWipeCloud) {
+          resetSystem();
+          setShowResetConfirm(false);
+          return;
+      }
+
+      // 连远端一起清：顺序不能反——先停调度（否则清完云端本机又推一次），
+      // 再清远端，最后才格式化本机（localStorage.clear 会带走所有凭据，
+      // 清完就再也没法登录云端删东西了）。
+      setResetBusy(true);
+      try {
+          setResetProgress('正在停止自动备份…');
+          const { stopAutoBackupScheduler, writeAutoBackupState, readAutoBackupState } =
+              await import('../utils/githubAutoBackup');
+          stopAutoBackupScheduler();
+          writeAutoBackupState({ ...readAutoBackupState(), enabled: false });
+          updateCloudBackupConfig({ enabled: false });
+
+          setResetProgress('正在清空云端备份…');
+          const { purgeCloudBackups } = await import('../utils/purgeCloudBackups');
+          const report = await purgeCloudBackups(cloudBackupConfig);
+          const summary = report.steps.map((s) => `${s.label}：${s.message}`).join('\n');
+
+          if (!report.allOk) {
+              // 远端没清干净就不动本机——本机凭据是清远端的唯一钥匙，
+              // 先格式化会让残留备份永远删不掉。
+              setResetBusy(false);
+              setResetProgress('');
+              showError('云端备份没清干净，已中止格式化', `本机数据没有改动。\n${summary}`);
+              return;
+          }
+
+          addToast('云端备份已清空，正在格式化本机…', 'success');
+          trackEvent('格式化系统', { wipeCloud: true });
+          setResetProgress('正在格式化本机…');
+          resetSystem();
+      } catch (e: any) {
+          setResetBusy(false);
+          setResetProgress('');
+          showError('清空云端备份失败，已中止格式化', String(e?.message || e));
+      }
   };
 
   // 保存实时感知配置
@@ -2268,9 +2312,13 @@ const Settings: React.FC = () => {
                 清理已删除角色遗留的「幽灵表情包」：专属分类的角色没了之后，单聊表情面板看不到它、群聊面板却还冒出来。先扫描列出结果，确认后才会删除。
             </p>
 
-            <button onClick={() => setShowResetConfirm(true)} className="w-full py-3 bg-red-50 border border-red-100 text-red-500 rounded-xl text-xs font-bold flex items-center justify-center gap-2">
+            <button onClick={() => { setResetWipeCloud(false); setResetProgress(''); setShowResetConfirm(true); }} className="w-full py-3 bg-red-50 border border-red-100 text-red-500 rounded-xl text-xs font-bold flex items-center justify-center gap-2">
                 格式化系统 (出厂设置)
             </button>
+            <p className="text-[10px] text-slate-400 px-1 mt-2 leading-relaxed">
+                清空本机全部数据。弹窗里可勾「连云端备份一起清干净」——同时删掉备份目的地的历史备份和云同步快照，
+                否则重装/重新登录后旧数据会被拉回来。
+            </p>
         </SettingsSection>
 
         {/* 云端备份区域 */}
@@ -4872,11 +4920,13 @@ const Settings: React.FC = () => {
       <Modal
           isOpen={showResetConfirm}
           title="系统警告"
-          onClose={() => setShowResetConfirm(false)}
+          onClose={() => { if (!resetBusy) { setShowResetConfirm(false); setResetWipeCloud(false); } }}
           footer={
               <div className="flex gap-2 w-full">
-                  <button onClick={() => setShowResetConfirm(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-2xl">取消</button>
-                  <button onClick={confirmReset} className="flex-1 py-3 bg-red-500 text-white font-bold rounded-2xl shadow-lg shadow-red-200">确认格式化</button>
+                  <button disabled={resetBusy} onClick={() => { setShowResetConfirm(false); setResetWipeCloud(false); }} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-2xl disabled:opacity-50">取消</button>
+                  <button disabled={resetBusy} onClick={confirmReset} className="flex-1 py-3 bg-red-500 text-white font-bold rounded-2xl shadow-lg shadow-red-200 disabled:opacity-60">
+                      {resetBusy ? '清理中…' : resetWipeCloud ? '确认全部清除' : '确认格式化'}
+                  </button>
               </div>
           }
       >
@@ -4885,6 +4935,28 @@ const Settings: React.FC = () => {
               <p className="text-center text-sm text-slate-600 font-medium">
                   这将<span className="text-red-500 font-bold">永久删除</span>所有角色、聊天记录和设置，且无法恢复！
               </p>
+
+              <label className="w-full flex items-start gap-2.5 bg-red-50/60 border border-red-100 rounded-xl p-3 cursor-pointer active:scale-[0.99] transition-transform">
+                  <input
+                      type="checkbox"
+                      checked={resetWipeCloud}
+                      disabled={resetBusy}
+                      onChange={(e) => setResetWipeCloud(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 accent-red-500 shrink-0"
+                  />
+                  <span className="text-[11px] leading-relaxed text-slate-600">
+                      <b className="text-red-500">连云端备份一起清干净</b>
+                      <br />
+                      同时删掉备份目的地（{cloudBackupConfig.provider === 'backend' ? '本地后端 git 仓库' : cloudBackupConfig.provider === 'github' ? 'GitHub Releases' : 'WebDAV'}）里的<b>全部历史备份</b>，
+                      以及云同步里的整包快照与密钥行。不勾选的话本机清空后，重新登录还会把旧数据拉回来。
+                      <br />
+                      <span className="text-slate-400">远端清不干净会中止格式化，本机数据不受影响。</span>
+                  </span>
+              </label>
+
+              {resetBusy && resetProgress && (
+                  <p className="text-[11px] text-slate-500 font-medium">{resetProgress}</p>
+              )}
           </div>
       </Modal>
 

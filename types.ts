@@ -3683,6 +3683,10 @@ export interface SocialComment {
     isCharacter?: boolean;
     authorType?: 'user' | 'character' | 'stranger';
     authorCharId?: string;
+    /** 被回复评论的 id（扁平存储，渲染时按此显示「回复 @xx」归属） */
+    replyToId?: string;
+    /** 被回复者名字（渲染快照，免得每条回复都回查父评论） */
+    replyToName?: string;
 }
 
 export interface SocialPost {

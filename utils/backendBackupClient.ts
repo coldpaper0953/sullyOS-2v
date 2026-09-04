@@ -140,3 +140,22 @@ export async function fetchBackupStatus(): Promise<{
         return null;
     }
 }
+
+/**
+ * 清空本地后端备份仓库（文件树 + git 历史全删，仓库重建为空）。
+ * 只给「格式化系统 · 连云端备份一起清」这条链路用——正常备份流程绝不调它。
+ */
+export async function purgeAllBackups(): Promise<{ ok: boolean; message: string }> {
+    try {
+        const data = await backendFetch<{ historyWiped: boolean; removedBytes: number }>('/v1/backup/all', {
+            method: 'DELETE',
+        });
+        const mb = (data.removedBytes / 1024 / 1024).toFixed(1);
+        return {
+            ok: true,
+            message: `本地后端备份仓库已清空（${mb} MB${data.historyWiped ? '，git 历史一并删除' : ''}）`,
+        };
+    } catch (e: any) {
+        return { ok: false, message: e?.message || '清空本地后端备份失败' };
+    }
+}

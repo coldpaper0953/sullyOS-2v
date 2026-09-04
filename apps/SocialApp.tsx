@@ -171,6 +171,9 @@ const SocialApp: React.FC = () => {
     // Comment Input State
     const [commentInput, setCommentInput] = useState('');
     const [isReplyingToUser, setIsReplyingToUser] = useState(false);
+    // 回复评论：当前正在回复哪条（null = 普通发帖评论）
+    const [replyingTo, setReplyingTo] = useState<SocialComment | null>(null);
+    const commentInputRef = useRef<HTMLInputElement>(null);
 
     // Settings / Handle Management
     const [showSettings, setShowSettings] = useState(false);
@@ -737,7 +740,7 @@ ${contextPrompt}
         }
     };
 
-    const generateRepliesToUser = async (post: SocialPost, userContent: string) => {
+    const generateRepliesToUser = async (post: SocialPost, userContent: string, replyTarget?: SocialComment) => {
         if (!apiConfig.apiKey) return;
         if (replyRequestRef.current) return;
         const controller = new AbortController();
@@ -764,6 +767,11 @@ ${contextPrompt}
                 postAuthorInfo += ' (用户本人)';
             }
 
+            // 用户在回复谁的评论——楼里那条被回复的评论上下文
+            const replyContext = replyTarget
+                ? `**用户 "${socialProfile.name}" 回复的是楼里这条评论**: ${replyTarget.authorName}（${replyTarget.authorType === 'character' ? '角色马甲' : replyTarget.authorType === 'user' ? '用户本人' : '路人'}）说过的「${replyTarget.content}」\n`
+                : '';
+
             const prompt = `### 任务: 回复用户的评论
 **帖子楼主**: ${postAuthorInfo}
 **帖子标题**: "${post.title}"
@@ -771,9 +779,9 @@ ${contextPrompt}
 """
 ${post.content || '(楼主没写正文)'}
 """
-**用户 "${socialProfile.name}" 刚在帖子下发的评论**: "${userContent}"
+${replyContext}**用户 "${socialProfile.name}" 刚在帖子下发的评论**: "${userContent}"
 
-请基于楼主帖子的【标题 + 正文】+ 用户的评论上下文，生成 1-3 条对用户这条评论的回复，要扣题，不能脱离正文凭空发挥。
+请基于楼主帖子的【标题 + 正文】${replyTarget ? '+ 被回复的那条评论上下文' : ''} + 用户的评论上下文，生成 1-3 条对用户这条评论的回复，要扣题，不能脱离正文凭空发挥。${replyTarget ? '优先由被回复的那位评论者本人来回。' : ''}
 ${identityMap}
 
 ### 禁令
@@ -795,6 +803,10 @@ ${identityMap}
             if (controller.signal.aborted) return;
             const json = safeParseJSON(data.choices[0].message.content);
             if (Array.isArray(json)) {
+                // 用户那条评论此刻已在楼里——按内容回查真实 id，AI 回复挂它上面
+                const liveUserComment = (feedRef.current.find(p => p.id === post.id)?.comments || [])
+                    .find(c => c.authorType === 'user' && c.content === userContent.trim());
+                const userCommentId = liveUserComment?.id;
                 const newReplies: SocialComment[] = json
                     .filter((c: any) => {
                         const name = (c?.author || c?.authorName || '').toString().trim();
@@ -814,11 +826,13 @@ ${identityMap}
                             id: `cmt-reply-${Date.now()}-${Math.random()}`,
                             authorName: authorName,
                             authorAvatar: avatar,
-                            content: `回复 @${socialProfile.name}: ${c.content}`,
+                            content: c.content,
                             likes: Math.floor(Math.random() * 10),
                             isCharacter: !!char,
                             authorType: char ? 'character' : 'stranger',
                             authorCharId: char?.id,
+                            // 结构化回复：挂到用户那条评论上（替代旧的「回复 @xxx:」文本前缀）
+                            ...(replyTarget && userCommentId ? { replyToId: userCommentId, replyToName: socialProfile.name } : {}),
                         } as SocialComment;
                     });
                 if (newReplies.length > 0) {
@@ -887,10 +901,11 @@ ${identityMap}
         trackEvent('点赞一条帖子', { action: post.isLiked ? 'unlike' : 'like' });
     };
     
-    const handleSendComment = async () => { 
-        if (!selectedPost || !commentInput.trim()) return; 
+    const handleSendComment = async () => {
+        if (!selectedPost || !commentInput.trim()) return;
         if (commentRequestRef.current?.postId === selectedPost.id || replyRequestRef.current) return;
 
+        const replyTarget = replyingTo;
         const userComment: SocialComment = {
                 id: `cmt-user-${Date.now()}`,
                 authorName: socialProfile.name, // Use Local Identity
@@ -899,15 +914,17 @@ ${identityMap}
                 likes: 0,
                 isCharacter: false,
                 authorType: 'user' as const,
+                ...(replyTarget ? { replyToId: replyTarget.id, replyToName: replyTarget.authorName } : {}),
         };
         const updatedPost = updatePostInFeed(selectedPost.id, current => ({
             ...current,
             comments: mergeSocialComments(current.comments || [], [userComment]),
         }));
         if (!updatedPost) return;
-        const contentToSend = commentInput; 
-        setCommentInput(''); 
-        await generateRepliesToUser(updatedPost, contentToSend); 
+        const contentToSend = commentInput;
+        setCommentInput('');
+        setReplyingTo(null);
+        await generateRepliesToUser(updatedPost, contentToSend, replyTarget || undefined);
     };
 
     const handleOpenPost = (post: SocialPost) => {
@@ -937,6 +954,7 @@ ${identityMap}
             commentDelayTimerRef.current = null;
         }
         setLoadingComments(false);
+        setReplyingTo(null);
         setSelectedPost(null);
     };
 
@@ -1050,11 +1068,24 @@ ${identityMap}
                                         <div className="flex-1">
                                             <div className="flex justify-between items-start">
                                                 <span className={`text-xs font-bold ${c.isCharacter ? 'text-slate-800' : 'text-slate-500'}`}>{c.authorName}</span>
-                                                <div className="flex items-center gap-1 text-slate-400 cursor-pointer hover:text-[#ff2442]">
-                                                    <Icons.Heart filled={false} className="w-3.5 h-3.5" />
-                                                    <span className="text-[10px]">{c.likes}</span>
+                                                <div className="flex items-center gap-2">
+                                                    <button
+                                                        onClick={() => { setReplyingTo(c); commentInputRef.current?.focus(); }}
+                                                        className="text-[10px] text-slate-300 hover:text-[#ff2442] font-medium transition-colors"
+                                                    >
+                                                        回复
+                                                    </button>
+                                                    <div className="flex items-center gap-1 text-slate-400 cursor-pointer hover:text-[#ff2442]">
+                                                        <Icons.Heart filled={false} className="w-3.5 h-3.5" />
+                                                        <span className="text-[10px]">{c.likes}</span>
+                                                    </div>
                                                 </div>
                                             </div>
+                                            {c.replyToId && (
+                                                <span className="block text-[11px] text-slate-400 mt-0.5 truncate">
+                                                    回复 @{c.replyToName || '…'}
+                                                </span>
+                                            )}
                                             <p className="text-[13px] text-slate-700 mt-0.5 leading-normal font-light">{c.content}</p>
                                         </div>
                                     </div>
@@ -1066,14 +1097,21 @@ ${identityMap}
 
                     {/* Bottom Input Bar - Absolute to sit on top of scroll area at bottom */}
                     <div className="absolute bottom-0 w-full pb-[var(--safe-bottom,0px)] z-30 pointer-events-none">
+                        {replyingTo && (
+                            <div className="pointer-events-auto mx-3 mb-1 flex items-center justify-between bg-[#fff2f3] border border-[#ffd9dd] rounded-lg px-3 py-1.5">
+                                <span className="text-[11px] text-[#ff2442] font-medium truncate">回复 @{replyingTo.authorName}：{replyingTo.content.slice(0, 30)}{replyingTo.content.length > 30 ? '…' : ''}</span>
+                                <button onClick={() => setReplyingTo(null)} className="text-[#ff2442] text-xs font-bold shrink-0 ml-2 active:opacity-60">✕</button>
+                            </div>
+                        )}
                          <div className="pointer-events-auto h-16 bg-white/80 backdrop-blur-xl border-t border-white/40 px-4 flex items-center justify-between gap-4 shadow-[0_-4px_20px_rgba(0,0,0,0.03)]">
                             <div className="flex-1 bg-slate-100/50 rounded-full px-5 py-2.5 flex items-center gap-2 focus-within:bg-white focus-within:ring-1 focus-within:ring-slate-200 transition-all border border-transparent focus-within:border-slate-200">
-                                <input 
+                                <input
+                                    ref={commentInputRef}
                                     value={commentInput}
                                     onChange={(e) => setCommentInput(e.target.value)}
                                     onKeyDown={(e) => e.key === 'Enter' && handleSendComment()}
                                     disabled={loadingComments || isReplyingToUser}
-                                    placeholder="说点什么..."
+                                    placeholder={replyingTo ? `回复 @${replyingTo.authorName}...` : "说点什么..."}
                                     className="bg-transparent text-sm w-full outline-none text-slate-800 placeholder:text-slate-400 disabled:opacity-50"
                                 />
                                 {commentInput.trim() && <button disabled={loadingComments || isReplyingToUser} onClick={handleSendComment} className="text-[#ff2442] font-bold text-sm animate-fade-in disabled:opacity-40">发送</button>}

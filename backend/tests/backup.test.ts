@@ -210,4 +210,53 @@ describe.skipIf(!gitAvailable)('备份仓库通道 /v1/backup/*（真 git + 临�
     });
     expect(res.statusCode).toBe(400);
   });
+
+  it('DELETE /v1/backup/all → 文件树+git 历史全清、仓库重建为空（重置链路）', async () => {
+    // 先传一份，保证有东西可清
+    await app.inject({
+      method: 'POST', url: '/v1/backup/upload', headers: { ...auth, 'content-type': 'application/zip' }, payload: validBackup(),
+    });
+    const before = (await app.inject({ method: 'GET', url: '/v1/backup/status', headers: auth })).json().data;
+    expect(before.exists).toBe(true);
+
+    const res = await app.inject({ method: 'DELETE', url: '/v1/backup/all', headers: auth });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.historyWiped).toBe(true);
+
+    // 仓库回到「空仓库」状态：无提交、无文件
+    const status = (await app.inject({ method: 'GET', url: '/v1/backup/status', headers: auth })).json().data;
+    expect(status.exists).toBe(true);
+    expect(status.latestCommit).toBeNull();
+    expect(status.fileCount).toBe(0);
+    expect(status.sizeBytes).toBe(0);
+
+    // history 空；download 404
+    const history = (await app.inject({ method: 'GET', url: '/v1/backup/history', headers: auth })).json().data;
+    expect(history).toHaveLength(0);
+    const dl = await app.inject({ method: 'GET', url: '/v1/backup/download', headers: auth });
+    expect(dl.statusCode).toBe(404);
+
+    // 清完还能继续收新备份（仓库可用性不破）
+    const up = await app.inject({
+      method: 'POST', url: '/v1/backup/upload', headers: { ...auth, 'content-type': 'application/zip' }, payload: validBackup(),
+    });
+    expect(up.statusCode).toBe(200);
+    expect(up.json().data.committed).toBe(true);
+  });
+
+  it('DELETE /v1/backup/all?keepHistory=1 → 只清工作树、旧提交还挂在 git 历史里', async () => {
+    await app.inject({
+      method: 'POST', url: '/v1/backup/upload', headers: { ...auth, 'content-type': 'application/zip' }, payload: validBackup(),
+    });
+    const res = await app.inject({ method: 'DELETE', url: '/v1/backup/all?keepHistory=1', headers: auth });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.historyWiped).toBe(false);
+
+    const history = (await app.inject({ method: 'GET', url: '/v1/backup/history', headers: auth })).json().data;
+    // 旧 commit + 空树 commit 至少两跳历史在
+    expect(history.length).toBeGreaterThanOrEqual(2);
+    const status = (await app.inject({ method: 'GET', url: '/v1/backup/status', headers: auth })).json().data;
+    expect(status.fileCount).toBe(0);
+    expect(status.sizeBytes).toBe(0);
+  });
 });

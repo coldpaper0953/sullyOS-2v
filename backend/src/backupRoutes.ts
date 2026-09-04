@@ -6,6 +6,7 @@
  *   GET  /v1/backup/status    最新提交/文件数/体积（前端启动与回前台对比用）
  *   GET  /v1/backup/history   最近提交列表（映射成 CloudBackupFile 供「云端备份」UI 复用）
  *   GET  /v1/backup/download  当前文件树重新打包 zip（自动恢复/手动恢复拉取用）
+ *   DELETE /v1/backup/all     清空备份仓库（重置链路用；?keepHistory=1 保留 git 历史）
  *
  * 备份不写 PostgreSQL（pg Pool 懒连接，PG 没起也能用这条通道）。
  */
@@ -15,6 +16,7 @@ import path from 'node:path';
 import {
   BackupValidationError,
   buildBackupZip,
+  purgeBackupRepo,
   repoHistory,
   repoStatus,
   uploadBackupBuffer,
@@ -85,5 +87,14 @@ export async function registerBackupRoutes(app: FastifyInstance): Promise<void> 
       }
       throw error;
     }
+  });
+
+  // 重置用：清空备份仓库的全部内容（工作树 + git 历史），仓库目录保留、
+  // 回到「空仓库」状态。带 ?keepHistory=1 只清当前文件树、保留 git 历史。
+  app.delete('/v1/backup/all', async (request) => {
+    const keepHistory = (request.query as { keepHistory?: string }).keepHistory === '1';
+    const result = await purgeBackupRepo(backupDir(), { keepHistory });
+    app.log.info({ ...result }, 'backup repo purged');
+    return { data: result };
   });
 }

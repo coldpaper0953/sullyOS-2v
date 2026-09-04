@@ -299,3 +299,40 @@ export async function uploadBackupBuffer(
   const commit = await commitBackupTree(backupDir, at);
   return { ...commit, fileCount };
 }
+
+export interface PurgeResult {
+  /** 是否清掉了 git 历史（keepHistory=1 或仓库本来为空时为 false） */
+  historyWiped: boolean;
+  /** 清掉的文件树字节数（purge 前的 treeSize） */
+  removedBytes: number;
+}
+
+/**
+ * 清空备份仓库：默认工作树 + .git 全删后重建空仓库（历史不可恢复）；
+ * keepHistory=true 只把工作树清到空提交（旧历史还挂在 git 里）。
+ * 重置链路（前端「格式化系统」勾选「连备份一起清」）走默认全清。
+ */
+export async function purgeBackupRepo(
+  backupDir: string,
+  options: { keepHistory?: boolean } = {},
+): Promise<PurgeResult> {
+  const existed = await fs.stat(backupDir).then(() => true).catch(() => false);
+  const removedBytes = existed ? await treeSize(backupDir) : 0;
+
+  if (options.keepHistory) {
+    if (!existed) return { historyWiped: false, removedBytes };
+    await ensureGitRepo(backupDir);
+    // 只清工作树：删掉 .git 之外的条目，提交一个空树
+    for (const entry of await fs.readdir(backupDir)) {
+      if (entry === '.git') continue;
+      await fs.rm(path.join(backupDir, entry), { recursive: true, force: true });
+    }
+    await commitBackupTree(backupDir, new Date(0));
+    return { historyWiped: false, removedBytes };
+  }
+
+  // 全清：整个目录（含 .git）删掉重建空仓库
+  if (existed) await fs.rm(backupDir, { recursive: true, force: true });
+  await ensureGitRepo(backupDir);
+  return { historyWiped: true, removedBytes };
+}
