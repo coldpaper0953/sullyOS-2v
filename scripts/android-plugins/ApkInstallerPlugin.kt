@@ -91,7 +91,7 @@ class ApkInstallerPlugin : Plugin() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !canRequestInstalls()) {
                 return call.resolve(JSObject().apply { put("status", "permission_required") })
             }
-            val apkUri = android.provider.FileProvider.getUriForFile(
+            val apkUri = androidx.core.content.FileProvider.getUriForFile(
                 activity,
                 "${activity.packageName}.fileprovider",
                 File(path),
