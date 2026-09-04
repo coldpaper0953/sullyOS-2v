@@ -107,12 +107,66 @@ git pull origin main     # 或首次：git clone <私有仓库> data/backup-repo
 
 ---
 
-## 三、手机：什么都不用动
+## 三、手机连 PC 的本地后端（手机也走 git 仓库备份线）
+
+> ⚠️ **先读这条**：手机不能从线上站（https://coldpaper0953.github.io）直接调 PC 的
+> HTTP 后端——HTTPS 页面发起 HTTP 请求会被浏览器的**混合内容（mixed content）策略**
+> 无声拦截，请求根本出不了手机（实测抓到）。所以手机连 PC 后端时，手机访问的是
+> **PC 上起的本地前端页**，不是线上站。
+
+### PC 侧一次性配置（三步）
+
+```bash
+# 1. 后端监听局域网（默认只听 127.0.0.1）
+#    docker：compose.yaml 把 api 的端口映射 "127.0.0.1:43210:4310" 改成 "43210:4310"
+#    tsx 直跑：环境变量 HOST=0.0.0.0
+
+# 2. 前端静态页也监听局域网
+set HOST=0.0.0.0 && node scripts/local-static-server.cjs dist
+
+# 3. 防火墙放行两个端口（Windows，管理员）
+netsh advfirewall firewall add rule name="SullyOS Backend 43210" dir=in action=allow protocol=TCP localport=43210
+netsh advfirewall firewall add rule name="SullyOS Local Web 4173" dir=in action=allow protocol=TCP localport=4173
+```
+
+**CORS 必须加手机页面的源**：后端 `ALLOWED_ORIGINS` 里加上
+`http://<PC内网IP>:4173`（例：`http://192.168.2.60:4173`）。漏了这一步手机页会被
+后端 CORS 拦掉所有请求。docker 在 compose 的 api 服务 environment 里改；tsx 直跑用
+环境变量。
+
+### 手机侧（两步）
+
+1. 手机和 PC 连**同一个 Wi-Fi**，手机浏览器打开 `http://<PC内网IP>:4173`
+   （PC 内网 IP 用 `ipconfig` 查，IPv4 地址那行；本机示例 192.168.2.60）。
+   想当 App 用就在手机浏览器菜单里「添加到主屏幕」。
+2. 设置 → **SullyOS 自主后端**：地址填 `http://<PC内网IP>:43210`，配对或直接填
+   APP Token；然后设置 → **云端备份** → 点「本地后端」连接，开启自动备份。
+
+之后手机每 4 小时自动把数据备份进 PC 的 `backend/data/backup-repo` git 仓库，
+换手机 / 清后台后打开页面自动全量恢复；密钥仍走云端账号加密同步线。
+
+### 与线上站的取舍
+
+- 手机连 PC 后端 = **只有 PC 开机时才能备份/恢复**（PC 关机则备份静默失败，
+  下个周期自动补跑；恢复要等 PC 开机）。
+- 想要手机 24 小时都有云端兜底：手机保持 GitHub Releases 线（线上站），
+  PC 用本地线——两个设备各走各的 provider，互不干扰。**一台设备的备份目的地只有一个**，
+  按设备选择，不是全局的。
+
+### 安全提醒
+
+局域网内所有设备都能访问放行的端口。家用 Wi-Fi 下风险可控，但：
+- APP_TOKEN 一定改成自己的随机长串（别用示例 dev token）；
+- 在公共网络（公司 / 咖啡店 Wi-Fi）时建议关掉这两条防火墙规则或让 Windows
+  把当前网络标记为「公用网络」后只在「专用」配置文件放行。
+
+---
+
+## 四、手机不改任何东西（默认姿势）
 
 手机继续用线上站（https://coldpaper0953.github.io/sullyOS-2v/）+ GitHub Releases 备份 +
-Supabase 云同步，行为与本通道上线前完全一致。想给手机换成本地后端也可以
-（手机和 PC 同一 Wi-Fi 时填 `http://<PC内网IP>:43210`——需要把 compose 的端口映射从
-`127.0.0.1:43210` 改成 `0.0.0.0:43210` 并自行保证局域网安全，默认不建议）。
+Supabase 云同步，行为与本通道上线前完全一致。上面第三节是可选项，只在你想让手机
+也进 git 仓库线时才做。
 
 ---
 
