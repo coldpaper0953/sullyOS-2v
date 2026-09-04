@@ -3342,13 +3342,16 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       autoRestoreCheckedRef.current = true;
       // 空机判定用 DB 实况而不是 React state（此时云同步可能已经灌完数据，state 还没刷）
       void (async () => {
-          let characterCount = 0;
+          // 内置 Sully 预设不算「用户数据」：数据初始化在 isDataLoaded 之前就会把
+          // 预设角色播种进空库（清后台/换机的设备一开机会话就恒 ≥1），不剔除的话
+          // 空机判定永远不成立、自动恢复永远不触发（线上实测抓到）。
+          let userCharacterCount = 0;
           let messageCount = 0;
           try {
-              await DB.streamRawStoreData('characters', () => { characterCount++; });
+              await DB.streamRawStoreData('characters', (item: any) => { if (item?.id !== sullyV2.id) userCharacterCount++; });
               await DB.streamRawStoreData('messages', () => { messageCount++; });
           } catch { /* store 不存在按 0 处理 */ }
-          if (!shouldAutoRestore(characterCount, messageCount, Date.now())) return;
+          if (!shouldAutoRestore(userCharacterCount, messageCount, Date.now())) return;
           try {
               addToast('检测到本机没有数据，正在从 GitHub 备份恢复…', 'info');
               const { listBackups, downloadBackup } = await import('../utils/githubClient');
