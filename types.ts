@@ -4077,9 +4077,10 @@ export interface FullBackupData {
 }
 
 // --- CLOUD BACKUP TYPES ---
-// Two providers share one config: WebDAV (legacy) and GitHub Releases (new,
-// no GFW friction for most users — just paste a Personal Access Token).
-export type CloudBackupProvider = 'webdav' | 'github';
+// Three providers share one config: WebDAV (legacy), GitHub Releases (mobile /
+// off-machine), and the local Fastify backend (desktop primary — sanitized zip
+// unzipped into a git-diffable JSON tree, auto-committed by the server).
+export type CloudBackupProvider = 'webdav' | 'github' | 'backend';
 
 export interface CloudBackupConfig {
     enabled: boolean;
@@ -4099,6 +4100,10 @@ export interface CloudBackupConfig {
     githubUseProxy?: boolean;   // route through Cloudflare Worker (for GFW)
     githubProxyConsentVersion?: number; // must be 1: user explicitly accepted proxy transit after the safety change
 
+    // 本地 backend（provider='backend'）不在这里存地址/令牌——直接复用「自主后端」
+    // 面板的 sullyos_backend_chat_v1（baseUrl + APP_TOKEN），一处配置两处用；
+    // 只需 updateCloudBackupConfig({ provider: 'backend' }) 即可切换。
+
     lastBackupTime?: number;    // timestamp
     lastBackupSize?: number;    // bytes
 }
@@ -4107,7 +4112,7 @@ export interface CloudBackupFile {
     name: string;
     size: number;
     lastModified: string | number; // ISO date string or epoch timestamp
-    href: string;               // WebDAV: remote path. GitHub: 'releaseId:assetId'
+    href: string;               // WebDAV: remote path. GitHub: 'releaseId:assetId'. backend: commit hash
     /** GitHub can expose an interrupted draft/release without a restorable asset set. */
     status?: 'ready' | 'incomplete';
     statusMessage?: string;

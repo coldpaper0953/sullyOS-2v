@@ -2,6 +2,7 @@ import cors from '@fastify/cors';
 import Fastify from 'fastify';
 import { z } from 'zod';
 import { registerAgentSettingsRoutes } from './agentSettings.js';
+import { registerBackupRoutes } from './backupRoutes.js';
 import { config } from './config.js';
 import { registerChatRoutes } from './chat.js';
 import { registerContextRoutes } from './contextSync.js';
@@ -182,6 +183,7 @@ await registerPushRoutes(app);
 await registerPairingRoutes(app);
 await registerToolConnectionRoutes(app);
 await registerPhonePeekRoutes(app);
+await registerBackupRoutes(app);
 
 app.setErrorHandler((error, _request, reply) => {
   if (error instanceof z.ZodError) {

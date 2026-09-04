@@ -3207,11 +3207,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   };
 
   // Backup provider router — picks the right client module based on
-  // cloudBackupConfig.provider ('github' or 'webdav', defaulting to webdav
-  // for back-compat with users who configured before the GitHub option).
+  // cloudBackupConfig.provider ('github' | 'backend' | 'webdav', defaulting to
+  // webdav for back-compat with users who configured before the GitHub option).
   const loadBackupProvider = async () => {
       if (cloudBackupConfig.provider === 'github') {
           return await import('../utils/githubClient');
+      }
+      if (cloudBackupConfig.provider === 'backend') {
+          return await import('../utils/backendBackupClient');
       }
       return await import('../utils/webdavClient');
   };
@@ -3300,7 +3303,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               if (!blob || blob.size === 0) return { ok: false, error: '导出为空' };
               const client = cfg.provider === 'github'
                   ? await import('../utils/githubClient')
-                  : await import('../utils/webdavClient');
+                  : cfg.provider === 'backend'
+                      ? await import('../utils/backendBackupClient')
+                      : await import('../utils/webdavClient');
               const filename = `Sully_AutoBackup_${Date.now()}.zip`;
               const result = await client.uploadBackup(cfg, blob, filename, () => {});
               if (!result.ok) {
@@ -3309,11 +3314,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               }
               updateCloudBackupConfig({ lastBackupTime: Date.now(), lastBackupSize: blob.size });
               await client.cleanupOldBackups(cfg, 5).catch(() => {});
-              trackEvent('自动备份到 GitHub', { result: '成功', size: blob.size });
+              trackEvent(`自动备份到 ${cfg.provider === 'backend' ? '本地后端' : cfg.provider === 'github' ? 'GitHub' : 'WebDAV'}`, { result: '成功', size: blob.size });
               return { ok: true };
           } catch (e: any) {
               console.warn('[自动备份] 失败:', e?.message || e);
-              trackEvent('自动备份到 GitHub', { result: '失败' });
+              trackEvent('自动备份失败', { result: '失败' });
               return { ok: false, error: e?.message || String(e) };
           }
       };
@@ -3329,6 +3334,39 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           stopAutoBackupScheduler();
       }
       return () => { stopAutoBackupScheduler(); };
+  }, [isDataLoaded, cloudBackupConfig]);
+
+  // ==== 本地 backend 的「git 仓库有没有新提交」检查 ====
+  // 启动时 + 回到前台各查一次 /v1/backup/status：比 localStorage 里记的 commit 新
+  // → 提示。区分「自己刚传的」与「别处推的」：commitTime 晚于 lastBackupTime 才算
+  // 别处的新提交（自动备份成功时会推进 lastBackupTime）。
+  // 空机场景不用这里管——上面的自动恢复链路（丢了才恢复）会直接拉回全量。
+  // backend 没起时静默跳过，绝不打扰。
+  useEffect(() => {
+      const checkNewCommit = async () => {
+          try {
+              const { fetchBackupStatus } = await import('../utils/backendBackupClient');
+              const status = await fetchBackupStatus();
+              if (!status?.latestCommit) return;
+              const anchorKey = 'sullyos_backend_backup_last_commit_v1';
+              const seen = localStorage.getItem(anchorKey);
+              if (status.latestCommit === seen) return;
+              localStorage.setItem(anchorKey, status.latestCommit);
+              // 别处（另一台设备）推的新提交才提示；自己 4h 调度器刚传的静默记下即可
+              const commitTime = status.commitTime ? new Date(status.commitTime).getTime() : 0;
+              const lastLocalBackup = cloudBackupConfigRef.current?.lastBackupTime || 0;
+              if (commitTime > lastLocalBackup + 60_000) {
+                  addToast('本地 git 仓库有其他设备的新备份，可在设置里恢复', 'info');
+              }
+          } catch { /* 后端没起/没配置：静默 */ }
+      };
+      if (isDataLoaded && cloudBackupConfig.provider === 'backend' && cloudBackupConfig.enabled) {
+          void checkNewCommit();
+          const onVisible = () => { if (document.visibilityState === 'visible') void checkNewCommit(); };
+          document.addEventListener('visibilitychange', onVisible);
+          return () => document.removeEventListener('visibilitychange', onVisible);
+      }
+      return;
   }, [isDataLoaded, cloudBackupConfig]);
 
   // ==== 「丢了才恢复」（用户拍板：清后台/清缓存/换机后的下一次启动自动拉回最新备份）====
@@ -3353,14 +3391,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           } catch { /* store 不存在按 0 处理 */ }
           if (!shouldAutoRestore(userCharacterCount, messageCount, Date.now())) return;
           try {
-              addToast('检测到本机没有数据，正在从 GitHub 备份恢复…', 'info');
-              const { listBackups, downloadBackup } = await import('../utils/githubClient');
+              const sourceLabel = cloudBackupConfig.provider === 'backend' ? '本地后端' : cloudBackupConfig.provider === 'github' ? 'GitHub' : 'WebDAV';
+              addToast(`检测到本机没有数据，正在从${sourceLabel}备份恢复…`, 'info');
+              const { listBackups, downloadBackup } = await loadBackupProvider();
               const files = (await listBackups(cloudBackupConfig))
                   .filter(f => f.status !== 'incomplete')
                   .sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime());
               if (files.length === 0) {
                   markAutoRestoreFailed();
-                  addToast('GitHub 上没有可用的备份', 'info');
+                  addToast(`${sourceLabel}上没有可用的备份`, 'info');
                   return;
               }
               const blob = await downloadBackup(cloudBackupConfig, files[0], () => {});

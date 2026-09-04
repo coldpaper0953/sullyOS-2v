@@ -1,0 +1,11 @@
+# 本机环境与密钥——绝不进仓库
+.env
+.env.local
+.env.production
+
+# 备份通道的 git 仓库（用户私有数据 + 可能含真实 token 的历史），绝不进公开仓库
+data/
+backups/
+
+node_modules/
+dist/

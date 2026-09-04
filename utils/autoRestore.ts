@@ -20,6 +20,7 @@
  */
 
 import type { CloudBackupConfig } from '../types';
+import { isBackendBackupReady } from './backendBackupClient';
 
 const KEY = 'sullyos_auto_restore_v1';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -101,6 +102,10 @@ export function setAutoRestoreOptOut(optOut: boolean, now: number = Date.now(), 
     writeState({ ...readAutoRestoreState(kv), optOutAt: optOut ? now : 0 }, kv);
 }
 
-/** 自动恢复的可行性判定：只认 GitHub provider（listBackups/download 的稳定路径）。 */
-export const canAutoRestore = (config: CloudBackupConfig | undefined | null): boolean =>
-    !!config?.enabled && config.provider === 'github' && !!config.githubToken && !!config.githubOwner;
+/** 自动恢复的可行性判定：github 凭据齐全或本地 backend 已配置（listBackups/download 的稳定路径）。 */
+export const canAutoRestore = (config: CloudBackupConfig | undefined | null): boolean => {
+    if (!config?.enabled) return false;
+    if (config.provider === 'github') return !!config.githubToken && !!config.githubOwner;
+    if (config.provider === 'backend') return isBackendBackupReady();
+    return false;
+};

@@ -82,10 +82,15 @@ describe('shouldAutoRestore 三道闸门', () => {
 });
 
 describe('canAutoRestore', () => {
-    it('只认 GitHub 且凭据齐全', () => {
+    it('github 凭据齐全或本地 backend 已配置才放行', () => {
         expect(canAutoRestore(undefined)).toBe(false);
         expect(canAutoRestore({ enabled: true, provider: 'webdav' } as any)).toBe(false);
         expect(canAutoRestore({ enabled: true, provider: 'github', githubToken: 't', githubOwner: 'o' } as any)).toBe(true);
         expect(canAutoRestore({ enabled: true, provider: 'github', githubToken: 't' } as any)).toBe(false);
+        // backend 通道凭据在「自主后端」localStorage 键里
+        expect(canAutoRestore({ enabled: true, provider: 'backend' } as any)).toBe(false); // 没配后端
+        localStorage.setItem('sullyos_backend_chat_v1', JSON.stringify({ baseUrl: 'http://127.0.0.1:43210', token: 'tok', enabled: true }));
+        expect(canAutoRestore({ enabled: true, provider: 'backend' } as any)).toBe(true);
+        localStorage.removeItem('sullyos_backend_chat_v1');
     });
 });

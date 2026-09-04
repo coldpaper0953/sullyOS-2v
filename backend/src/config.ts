@@ -8,8 +8,12 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(4310),
   APP_TOKEN: z.string().min(12).default('change-this-local-token'),
   ALLOWED_ORIGINS: z.string().default(
-    'http://localhost:3000,http://localhost:5173,http://127.0.0.1:5173',
+    // 4173 = 本地静态前端（open-local-web.bat / local-static-server.cjs）。
+    // 漏了它，4173 页面调 API 会被 CORS 拦（用户实测提醒过）。
+    'http://localhost:3000,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173',
   ),
+  // 备份文件树 + git 仓库的落盘目录。docker 里挂 bind mount 到宿主，用户可以直接看/推远端。
+  BACKUP_DIR: z.string().min(1).default('./data/backup-repo'),
   MODEL_BASE_URL: z.string().default(''),
   MODEL_API_KEY: z.string().default(''),
   MODEL_NAME: z.string().default(''),

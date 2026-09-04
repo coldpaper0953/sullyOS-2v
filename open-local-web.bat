@@ -2,9 +2,15 @@
 setlocal
 cd /d "%~dp0"
 
-set "NODE_EXE=C:\Program Files\nodejs\node.exe"
-if not exist "%NODE_EXE%" (
-  echo Node.js not found: %NODE_EXE%
+rem Node 探测链：先找 PATH，再扫常见安装位置，都找不到才报错退出。
+set "NODE_EXE="
+where node >nul 2>nul && for /f "delims=" %%i in ('where node') do if not defined NODE_EXE set "NODE_EXE=%%i"
+if not defined NODE_EXE if exist "%ProgramFiles%\nodejs\node.exe" set "NODE_EXE=%ProgramFiles%\nodejs\node.exe"
+if not defined NODE_EXE if exist "%ProgramFiles(x86)%\nodejs\node.exe" set "NODE_EXE=%ProgramFiles(x86)%\nodejs\node.exe"
+if not defined NODE_EXE if exist "%USERPROFILE%\.node\node.exe" set "NODE_EXE=%USERPROFILE%\.node\node.exe"
+if not defined NODE_EXE if exist "%LocalAppData%\Programs\nodejs\node.exe" set "NODE_EXE=%LocalAppData%\Programs\nodejs\node.exe"
+if not defined NODE_EXE (
+  echo Node.js not found: not in PATH, Program Files, %%USERPROFILE%%\.node or LocalAppData.
   pause
   exit /b 1
 )

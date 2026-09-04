@@ -1659,15 +1659,30 @@ const Settings: React.FC = () => {
   // GitHub auto-backup handlers — 开关/间隔改的是 localStorage 状态并立即重启调度器
   // （obsidian-git 的 reload timers 模式），runner 从 context 拿（闭包住当前的导出+上传逻辑）。
   const githubConnected = cloudBackupConfig.enabled && cloudBackupConfig.provider === 'github' && !!cloudBackupConfig.githubOwner;
+  // backend 通道就绪 = provider 已切 + 「自主后端」地址/令牌已配（sullyos_backend_chat_v1）
+  const [backendReady, setBackendReady] = useState(false);
+  useEffect(() => {
+      if (cloudBackupConfig.provider !== 'backend') { setBackendReady(false); return; }
+      let cancelled = false;
+      void import('../utils/backendBackupClient').then(m => {
+          if (!cancelled) setBackendReady(m.isBackendBackupReady());
+      });
+      return () => { cancelled = true; };
+  }, [cloudBackupConfig.provider]);
+  // 自动备份开关的守卫：github 或 backend 任一就绪即可开
+  const autoBackupCapable = githubConnected || backendReady;
+  // backend 测试结果状态（连接按钮的输出区）
+  const [backendTestResult, setBackendTestResult] = useState('');
+  const [backendTesting, setBackendTesting] = useState(false);
 
   const handleAutoBackupToggle = (enabled: boolean) => {
-      if (enabled && !githubConnected) {
-          addToast('先连接 GitHub 备份，才能开自动备份', 'error');
+      if (enabled && !autoBackupCapable) {
+          addToast('先连接 GitHub 或本地后端，才能开自动备份', 'error');
           return;
       }
       const next = setAutoBackupEnabled(enabled, autoBackupRunner);
       setAutoBackupState(next);
-      trackEvent('切换 GitHub 自动备份', { enabled });
+      trackEvent('切换自动备份', { enabled });
       addToast(enabled ? `自动备份已开启（每 ${Math.round(next.intervalMs / 3600000)} 小时）` : '自动备份已关闭', 'success');
   };
 
@@ -1735,7 +1750,7 @@ const Settings: React.FC = () => {
   };
 
   const handleDisableCloud = () => {
-      trackEvent('关闭云端备份', { provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav' });
+      trackEvent('关闭云端备份', { provider: cloudBackupConfig.provider ?? 'none' });
       updateCloudBackupConfig({ enabled: false });
       setShowCloudModal(false);
       setShowGithubModal(false);
@@ -1763,6 +1778,40 @@ const Settings: React.FC = () => {
           addToast('已切换回 WebDAV，旧备份依旧在', 'success');
       } else {
           setShowCloudModal(true);
+      }
+  };
+  // backend 通道没有独立弹窗——地址/令牌就是「自主后端」面板那份（一处配置两处用），
+  // 这里只做连通性探测 + 切 provider；未配置就指路，不帮用户猜。
+  const handleTestBackend = async () => {
+      setBackendTesting(true);
+      setBackendTestResult('');
+      trackEvent('连接云端备份服务商', { provider: 'backend' });
+      try {
+          const { testConnection, isBackendBackupReady } = await import('../utils/backendBackupClient');
+          if (!isBackendBackupReady()) {
+              trackEvent('测试本地后端备份', { result: '失败', failure_stage: 'not_configured' });
+              setBackendTestResult('✗ 还没配置后端：到下方「SullyOS 自主后端」面板填后端地址并配对');
+              return;
+          }
+          const result = await testConnection(cloudBackupConfig);
+          setBackendTestResult(result.ok ? `✓ ${result.message}` : `✗ ${result.message}`);
+          trackEvent('测试本地后端备份', result.ok ? { result: '成功' } : { result: '失败' });
+          if (result.ok) updateCloudBackupConfig({ enabled: true, provider: 'backend' });
+      } catch (e: any) {
+          trackEvent('测试本地后端备份', { result: '失败', failure_stage: 'exception' });
+          setBackendTestResult(`✗ ${e?.message || '连接失败'}`);
+      } finally {
+          setBackendTesting(false);
+      }
+  };
+  const switchToBackend = async () => {
+      trackEvent('切换云端备份服务商', { to: 'backend' });
+      const { isBackendBackupReady } = await import('../utils/backendBackupClient');
+      if (isBackendBackupReady()) {
+          updateCloudBackupConfig({ enabled: true, provider: 'backend' });
+          addToast('已切换到本地后端 git 仓库备份', 'success');
+      } else {
+          addToast('先到下方「SullyOS 自主后端」面板填后端地址并配对，再切换', 'info');
       }
   };
 
@@ -2237,9 +2286,9 @@ const Settings: React.FC = () => {
                 <div className="space-y-3 py-2">
                     <p className="text-[11px] text-slate-400 leading-relaxed text-center">
                         把备份上传到你自己的云端，换设备、丢手机都不怕。<br/>
-                        大文件推荐 <b>GitHub</b>（自动分片上传）。
+                        大文件推荐 <b>GitHub</b>（自动分片上传）；PC 装了本地后端就用 <b>本地 git 仓库</b>。
                     </p>
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-3 gap-2">
                         <button
                             onClick={() => { trackEvent('连接云端备份服务商', { provider: 'github' }); setShowGithubModal(true); }}
                             className="py-3 px-2 bg-gradient-to-br from-slate-800 to-slate-900 text-white rounded-xl text-xs font-bold shadow-sm active:scale-95 transition-all flex flex-col items-center gap-1.5 relative"
@@ -2257,22 +2306,49 @@ const Settings: React.FC = () => {
                             <span>WebDAV</span>
                             <span className="text-[9px] text-sky-100 font-normal">日本/NAS · 需梯子</span>
                         </button>
+                        {/* backend：地址/令牌复用「自主后端」面板，这里测试连通即切换 */}
+                        <button
+                            onClick={() => void handleTestBackend()}
+                            disabled={backendTesting}
+                            className="py-3 px-2 bg-gradient-to-br from-teal-600 to-emerald-600 text-white rounded-xl text-xs font-bold shadow-sm active:scale-95 transition-all flex flex-col items-center gap-1.5 disabled:opacity-60"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M5.25 14.25h13.5m-13.5 0a2.25 2.25 0 01-2.25-2.25v-2.25A2.25 2.25 0 015.25 7.5h13.5a2.25 2.25 0 012.25 2.25v2.25a2.25 2.25 0 01-2.25 2.25zm-1.5-6.75l1.06-3.18A2.25 2.25 0 016.94 2.5h10.12a2.25 2.25 0 012.13 1.57l1.06 3.18M4.5 14.25v2.25a2.25 2.25 0 002.25 2.25h10.5a2.25 2.25 0 002.25-2.25v-2.25M6 18.75h.008v.008H6v-.008zm12 0h.008v.008H18v-.008z" /></svg>
+                            <span>{backendTesting ? '连接中…' : '本地后端'}</span>
+                            <span className="text-[9px] text-emerald-100 font-normal">PC · git 仓库</span>
+                        </button>
                     </div>
+                    {backendTestResult && (
+                        <p className={`text-[10px] text-center leading-relaxed ${backendTestResult.startsWith('✓') ? 'text-emerald-600' : 'text-rose-500'}`}>
+                            {backendTestResult}
+                        </p>
+                    )}
                 </div>
             ) : (
                 <div className="space-y-3">
-                    <div className={`flex items-center justify-between rounded-xl px-3 py-2 ${cloudBackupConfig.provider === 'github' ? 'bg-slate-100' : 'bg-sky-50'}`}>
+                    <div className={`flex items-center justify-between rounded-xl px-3 py-2 ${
+                        cloudBackupConfig.provider === 'github' ? 'bg-slate-100'
+                        : cloudBackupConfig.provider === 'backend' ? 'bg-emerald-50'
+                        : 'bg-sky-50'}`}>
                         <div className="flex items-center gap-2">
                             <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
                             <span className="text-[11px] text-slate-600 font-medium">
                                 已连接 · {cloudBackupConfig.provider === 'github'
                                     ? `GitHub${cloudBackupConfig.githubOwner ? ` (@${cloudBackupConfig.githubOwner})` : ''}`
-                                    : 'WebDAV'}
+                                    : cloudBackupConfig.provider === 'backend'
+                                        ? '本地后端 git 仓库'
+                                        : 'WebDAV'}
                             </span>
                         </div>
                         <button
-                            onClick={() => cloudBackupConfig.provider === 'github' ? setShowGithubModal(true) : setShowCloudModal(true)}
-                            className={`text-[10px] font-medium ${cloudBackupConfig.provider === 'github' ? 'text-slate-600' : 'text-sky-500'}`}
+                            onClick={() => {
+                                if (cloudBackupConfig.provider === 'github') setShowGithubModal(true);
+                                else if (cloudBackupConfig.provider === 'webdav') setShowCloudModal(true);
+                                else addToast('后端地址/令牌在下方「SullyOS 自主后端」面板里改', 'info');
+                            }}
+                            className={`text-[10px] font-medium ${
+                                cloudBackupConfig.provider === 'github' ? 'text-slate-600'
+                                : cloudBackupConfig.provider === 'backend' ? 'text-emerald-600'
+                                : 'text-sky-500'}`}
                         >
                             修改配置
                         </button>
@@ -2289,6 +2365,12 @@ const Settings: React.FC = () => {
                         >
                             🔗 在 GitHub 上查看备份 (github.com/{cloudBackupConfig.githubOwner}/{cloudBackupConfig.githubRepo || 'sully-backup'}/releases) ↗
                         </a>
+                    )}
+                    {cloudBackupConfig.provider === 'backend' && (
+                        <p className="text-[10px] text-emerald-700 text-center leading-relaxed">
+                            备份以 JSON 文件树的形式存在后端仓库目录（可 git diff），每次备份自动生成一个 commit。
+                            换设备时从这里全量恢复，密钥由云端账号同步层自动补回。
+                        </p>
                     )}
 
                     {/* Switch-provider hint — shown to existing users so the
@@ -2316,6 +2398,30 @@ const Settings: React.FC = () => {
                         >
                             {cloudBackupConfig.webdavUrl ? '切换回 WebDAV →' : '改用 WebDAV 备份 →'}
                         </button>
+                    )}
+                    {/* 桌机本地后端：从任一 provider 都能一键切过去/切回来 */}
+                    {cloudBackupConfig.provider !== 'backend' ? (
+                        <button
+                            onClick={() => void switchToBackend()}
+                            className="w-full py-1.5 text-[10px] text-emerald-600 hover:text-emerald-700 transition-colors"
+                        >
+                            改用本地后端 git 仓库备份 →
+                        </button>
+                    ) : (
+                        <div className="flex justify-center gap-3">
+                            <button
+                                onClick={switchToGithub}
+                                className="py-1.5 text-[10px] text-slate-400 hover:text-sky-500 transition-colors"
+                            >
+                                {cloudBackupConfig.githubToken ? '切回 GitHub →' : '改用 GitHub →'}
+                            </button>
+                            <button
+                                onClick={switchToWebDAV}
+                                className="py-1.5 text-[10px] text-slate-400 hover:text-sky-500 transition-colors"
+                            >
+                                改用 WebDAV →
+                            </button>
+                        </div>
                     )}
                     {cloudBackupConfig.lastBackupTime && (
                         <p className="text-[10px] text-slate-400 text-center">
@@ -2354,8 +2460,9 @@ const Settings: React.FC = () => {
             )}
 
             <p className="text-[10px] text-slate-400 px-1 mt-3 leading-relaxed">
-                备份始终存放在你自己的 WebDAV 或 GitHub 账号中，项目不建立用户备份数据库。
-                网页 WebDAV 因跨域限制需要中转；GitHub 默认直连，网络受限时可自行开启中转。
+                备份始终存放在你自己的 WebDAV、GitHub 账号或本机后端仓库里，项目不建立用户备份数据库。
+                网页 WebDAV 因跨域限制需要中转；GitHub 默认直连，网络受限时可自行开启中转；
+                本地后端只监听 127.0.0.1，备份不离开你的电脑。
             </p>
         </SettingsSection>
 
@@ -3811,7 +3918,7 @@ const Settings: React.FC = () => {
               )}
 
               {/* 自动备份 — 用户拍板的 4 小时调度；密钥不进备份包 */}
-              {githubConnected && (
+              {autoBackupCapable && (
                   <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 space-y-2.5">
                       <label className="flex items-center gap-2 text-[11px] text-slate-700 font-medium cursor-pointer">
                           <input
@@ -3850,6 +3957,7 @@ const Settings: React.FC = () => {
                       <p className="text-[10px] text-slate-500 leading-relaxed pl-5">
                           后台挂着就行，到点自动上传；失败会在下个周期按原时间点补跑。密钥不进备份——
                           换设备后密钥由云端账号同步层（逐键加密）自动拉回。
+                          {cloudBackupConfig.provider === 'backend' && ' 当前目的地是本地后端 git 仓库。'}
                       </p>
                   </div>
               )}

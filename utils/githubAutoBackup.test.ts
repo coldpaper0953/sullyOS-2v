@@ -89,11 +89,17 @@ describe('readAutoBackupState / write roundtrip', () => {
 });
 
 describe('shouldSchedulerRun', () => {
-    it('只有 GitHub 已连接（enabled+token+owner）才放行', () => {
-        expect(shouldSchedulerRun(undefined)).toBe(false);
-        expect(shouldSchedulerRun({ enabled: true, provider: 'webdav' } as any)).toBe(false);
-        expect(shouldSchedulerRun({ enabled: true, provider: 'github', githubToken: 't', githubOwner: 'o' } as any)).toBe(true);
-        expect(shouldSchedulerRun({ enabled: false, provider: 'github', githubToken: 't', githubOwner: 'o' } as any)).toBe(false);
+    it('github：凭据齐全才放行；backend：地址+令牌就绪即放行；webdav/未启用不放行', async () => {
+        const mod = await loadFresh();
+        expect(mod.shouldSchedulerRun(undefined)).toBe(false);
+        expect(mod.shouldSchedulerRun({ enabled: true, provider: 'webdav' } as any)).toBe(false);
+        expect(mod.shouldSchedulerRun({ enabled: true, provider: 'github', githubToken: 't', githubOwner: 'o' } as any)).toBe(true);
+        expect(mod.shouldSchedulerRun({ enabled: false, provider: 'github', githubToken: 't', githubOwner: 'o' } as any)).toBe(false);
+        // backend 通道的凭据不在 CloudBackupConfig，走「自主后端」localStorage 键
+        expect(mod.shouldSchedulerRun({ enabled: true, provider: 'backend' } as any)).toBe(false); // 没配后端
+        localStorage.setItem('sullyos_backend_chat_v1', JSON.stringify({ baseUrl: 'http://127.0.0.1:43210', token: 'tok', enabled: true }));
+        expect(mod.shouldSchedulerRun({ enabled: true, provider: 'backend' } as any)).toBe(true);
+        expect(mod.shouldSchedulerRun({ enabled: false, provider: 'backend' } as any)).toBe(false); // 开关没开
     });
 });
 

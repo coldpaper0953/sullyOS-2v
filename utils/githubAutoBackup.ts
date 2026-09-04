@@ -20,6 +20,7 @@
  */
 
 import type { CloudBackupConfig } from '../types';
+import { isBackendBackupReady } from './backendBackupClient';
 
 const KEY = 'sullyos_github_auto_backup_v1';
 const HOUR_MS = 60 * 60 * 1000;
@@ -251,6 +252,13 @@ export function setAutoBackupInterval(intervalMs: number, runner: AutoBackupRunn
     return next;
 }
 
-/** 自动备份调度是否该启动的统一判定（OSContext 启动 + cloudBackupConfig 变化时调用）。 */
-export const shouldSchedulerRun = (config: CloudBackupConfig | undefined | null): boolean =>
-    !!config?.enabled && config.provider === 'github' && !!config.githubToken && !!config.githubOwner;
+/**
+ * 自动备份调度是否该启动的统一判定（OSContext 启动 + cloudBackupConfig 变化时调用）。
+ * github：凭据齐全即真。backend：地址/令牌在「自主后端」配置里（sullyos_backend_chat_v1）。
+ */
+export const shouldSchedulerRun = (config: CloudBackupConfig | undefined | null): boolean => {
+    if (!config?.enabled) return false;
+    if (config.provider === 'github') return !!config.githubToken && !!config.githubOwner;
+    if (config.provider === 'backend') return isBackendBackupReady();
+    return false;
+};
