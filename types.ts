@@ -3953,6 +3953,10 @@ export interface FullBackupData {
         userProfile?: SocialAppProfile;
         userId?: string;
         userBg?: string;
+        /** Spark 评论延迟（毫秒），localStorage spark_comment_delay_ms；缺省 = 备份没带，导入端不动 */
+        commentDelayMs?: number;
+        /** Spark 帖子流自动刷新（分钟，0=关），localStorage spark_auto_refresh_minutes */
+        autoRefreshMinutes?: number;
     };
     
     mediaAssets?: {

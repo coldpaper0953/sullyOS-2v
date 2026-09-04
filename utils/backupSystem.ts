@@ -132,6 +132,15 @@ export type ImportProgressUpdate = {
   error?: string;
 };
 
+// localStorage 数值键的导出读取：键缺失或非数字时返回 undefined，
+// 让 JSON 里干脆不出现该字段（导入端 typeof 判断保持「没带就不动」语义）。
+const readOptionalNumber = (key: string): number | undefined => {
+  const raw = localStorage.getItem(key);
+  if (raw == null || raw === '') return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+};
+
 let _importStartedAt: number | null = null;
 let _importSource: string | null = null;
 
@@ -364,7 +373,7 @@ export const exportSystemImpl = async (deps: BackupExportDeps, mode: 'text_only'
             'user_profile', 'diaries', 'tasks', 'anniversaries', 'room_todos',
             'room_notes', 'deps.groups', 'journal_stickers', 'social_posts', 'courses', 'games', 'deps.worldbooks', 'story_theaters', 'story_theater_presets', 'story_theater_masks', 'deps.novels', 'deps.songs',
             'bank_transactions', 'bank_data',
-            'xhs_activities', 'xhs_stock',
+            'xhs_activities', 'xhs_owned_posts', 'xhs_stock',
             'quizzes', 'guidebook', 'scheduled_messages', 'life_sim',
             'handbook', 'trackers', 'tracker_entries', 'hotnews_snapshots',
             'memory_nodes', 'memory_vectors', 'memory_links', 'topic_boxes', 'anticipations', 'event_boxes',
@@ -429,7 +438,10 @@ export const exportSystemImpl = async (deps: BackupExportDeps, mode: 'text_only'
                 charHandles: JSON.parse(localStorage.getItem('spark_char_handles') || '{}'),
                 userProfile: sparkSocialProfile ? JSON.parse(sparkSocialProfile) : undefined,
                 userId: localStorage.getItem('spark_user_id') || undefined,
-                userBg: sparkUserBg || undefined
+                userBg: sparkUserBg || undefined,
+                // Spark 两个数值设置（评论延迟/帖子流自动刷新）没有独立 store，落在这里随包带走
+                commentDelayMs: readOptionalNumber('spark_comment_delay_ms'),
+                autoRefreshMinutes: readOptionalNumber('spark_auto_refresh_minutes'),
             } : undefined,
             
             roomCustomAssets: (mode === 'text_only' || mode === 'media_only' || mode === 'full') ? (roomCustomAssets ? JSON.parse(roomCustomAssets) : []) : undefined,
@@ -729,6 +741,7 @@ export const exportSystemImpl = async (deps: BackupExportDeps, mode: 'text_only'
             songs: 'songs',
             bank_transactions: 'bankTransactions',
             xhs_activities: 'xhsActivities',
+            xhs_owned_posts: 'xhsOwnedPosts',
             xhs_stock: 'xhsStockImages',
             quizzes: 'quizSessions',
             guidebook: 'guidebookSessions',
@@ -979,6 +992,7 @@ export const exportSystemImpl = async (deps: BackupExportDeps, mode: 'text_only'
                     break;
                 }
                 case 'xhs_activities': backupData.xhsActivities = processedData; break;
+                case 'xhs_owned_posts': backupData.xhsOwnedPosts = processedData; break;
                 case 'xhs_stock': backupData.xhsStockImages = processedData; break;
                 case 'quizzes': backupData.quizSessions = processedData; break;
                 case 'guidebook': backupData.guidebookSessions = processedData; break;
@@ -1560,7 +1574,10 @@ export const importSystemImpl = async (deps: BackupImportDeps, fileOrJson: File 
             await restoreAssetsInPlace(data.socialAppData, '动态设置');
             if (data.socialAppData.charHandles) localStorage.setItem('spark_char_handles', JSON.stringify(data.socialAppData.charHandles));
             if (data.socialAppData.userId) localStorage.setItem('spark_user_id', data.socialAppData.userId);
-            
+            // 数值型 Spark 设置：只在备份里有值时回写，恢复端不做默认值兜底
+            if (typeof data.socialAppData.commentDelayMs === 'number') localStorage.setItem('spark_comment_delay_ms', String(data.socialAppData.commentDelayMs));
+            if (typeof data.socialAppData.autoRefreshMinutes === 'number') localStorage.setItem('spark_auto_refresh_minutes', String(data.socialAppData.autoRefreshMinutes));
+
             // Restore heavy assets to DB
             if (data.socialAppData.userProfile) await DB.saveAsset('spark_social_profile', JSON.stringify(data.socialAppData.userProfile));
             if (data.socialAppData.userBg) await DB.saveAsset('spark_user_bg', data.socialAppData.userBg);
