@@ -486,10 +486,12 @@ const createAndInitClient = async (config: ActiveMsg2GlobalConfig) => {
     // 真连上了就解除冷却，之后恢复自动探测。
     clearAmsgProbeCooldown();
   } catch (error) {
-    // 墙后/断网/Worker 已删会一次性收三个冷击——记个冷却，窗内别再用同样的三个探测
-    // 打网络，日志就不会一直刷。探测冷却挡的是"探测"，不影响下一次真正要发消息。
-    markAmsgProbeFailed();
-    throw normalizeActiveMsgApiError(error, '获取用户密钥', config.workerUrl);
+    const normalized = normalizeActiveMsgApiError(error, '获取用户密钥', config.workerUrl);
+    // 只对「网络类」失败写冷却（连不上/超时/拿到网页）。鉴权失败（401/403）是
+    // 配置问题，重试本身有意义，写冷却会把用户改对配置后的恢复硬拖 30 分钟。
+    const kind = readAmsgFailKind(normalized);
+    if (kind === '网络失败' || kind === '打到网页了') markAmsgProbeFailed();
+    throw normalized;
   }
   return client;
 };
@@ -3148,8 +3150,10 @@ export const ActiveMsgClient = {
   },
 
   async getCapabilities(): Promise<{ serverVersion: string; features: string[] } | null> {
-    // 冷却窗内不打网：/capabilities 是设置页的被动探测，别为它白挂一次
-    if (shouldSkipProbeNow()) return null;
+    // 冷却窗内不打网，但**不能返回 null**——设置页 probeWorkerCaps 把 null 判成
+    // 「端点不存在 / 版本过旧」误亮红牌。这里抛错，让调用方走 catch（catch 里
+    // 专门写「探测失败不误报」）。/capabilities 是设置页的被动探测，别为它白挂一次。
+    if (shouldSkipProbeNow()) throw new Error('主动消息 Worker 刚刚连不上，已暂停能力探测。');
     const globalConfig = await ensureWorkerReady();
     const client = createClient(globalConfig);
     return client.getCapabilities();
