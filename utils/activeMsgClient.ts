@@ -176,6 +176,35 @@ interface ReiCryptoBridge {
 
 const ACTIVE_MSG_RUNTIME_HEADER = '[ActiveMsg2]';
 
+// ─── 探测器冷却 ───────────────────────────────────────────────────────────────
+// 设备连不上 worker 时（墙后、无网、Worker 已删），所有探测/握手/能力校验都会刷
+// 出成串「Failed to fetch」日志。记录在 localStorage：最近 30 分钟里如果
+// 眼器是扫不到的，就不再重复打。时间到了或用户手动「重新连接」都会重新来一次。
+// 存的是「失败过一次就不会再有网络请求」的保护扇区，用户还能手动唤醒连回来的可能
+// 所以不拉长试验段。
+export const AMSG_PROBE_COOLDOWN_KEY = 'amsg_probe_cooldown_until';
+export const AMSG_PROBE_COOLDOWN_MS = 30 * 60 * 1000;
+/** null = 当前可探测；number = 冷却到该毫秒为止 */
+export function readAmsgProbeCooldown(): number | null {
+  try {
+    const raw = localStorage.getItem(AMSG_PROBE_COOLDOWN_KEY);
+    if (!raw) return null;
+    const until = Number(raw);
+    return Number.isFinite(until) && until > Date.now() ? until : null;
+  } catch { return null; }
+}
+export function clearAmsgProbeCooldown(): void {
+  try { localStorage.removeItem(AMSG_PROBE_COOLDOWN_KEY); } catch { /* ignore */ }
+}
+/** 一次探测/握手/连接的网络失败记录一个冷却窗口。 */
+export function markAmsgProbeFailed(): void {
+  try { localStorage.setItem(AMSG_PROBE_COOLDOWN_KEY, String(Date.now() + AMSG_PROBE_COOLDOWN_MS)); } catch { /* ignore */ }
+}
+/** 判断 AMSG 探测是否在冷却窗口内（如：三个连击失败信号都来自同一次故障的批装）。 */
+export function shouldSkipProbeNow(): boolean {
+  return readAmsgProbeCooldown() !== null;
+}
+
 /** amsg-server 的 DELETE /cancel-message 找不到目标行时回的错误码（HTTP 404）。 */
 const REMOTE_TASK_NOT_FOUND_CODE = 'TASK_NOT_FOUND';
 /** 行还在、但已经跑完出清（sent / failed）时回的错误码（HTTP 409）。 */
@@ -260,6 +289,7 @@ export interface AmsgWorkerEnvReport {
  * 用户同时看到两条口径不同的错误。
  */
 const inspectWorkerConfig = async (config: ActiveMsg2GlobalConfig): Promise<AmsgWorkerEnvReport | null> => {
+  if (shouldSkipProbeNow()) return null; // 冷却窗内不动网，保留之前提报的那份错走得更轻
   try {
     const { status, body } = await fetchWithAuthRaw('config-check', config, { method: 'GET' }, '配置自检');
     if (status !== 200 || !body?.success) return null;
@@ -453,13 +483,24 @@ const createAndInitClient = async (config: ActiveMsg2GlobalConfig) => {
   const client = createClient(config);
   try {
     await client.init();
+    // 真连上了就解除冷却，之后恢复自动探测。
+    clearAmsgProbeCooldown();
   } catch (error) {
+    // 墙后/断网/Worker 已删会一次性收三个冷击——记个冷却，窗内别再用同样的三个探测
+    // 打网络，日志就不会一直刷。探测冷却挡的是"探测"，不影响下一次真正要发消息。
+    markAmsgProbeFailed();
     throw normalizeActiveMsgApiError(error, '获取用户密钥', config.workerUrl);
   }
   return client;
 };
 
 const initializeClient = (config: ActiveMsg2GlobalConfig) => {
+  // 冷却窗内直接快速失败：worker 刚才就不可达（正是它设下的冷却），再走 get-user-key
+  // 只会白挂 31 秒。发消息/排程/点名共用这条路，失败会照常落到调用方的本地回退，
+  // 比每条消息都干等半分钟强。用户显式「重新连接」会先清冷却（见 connect）。
+  if (shouldSkipProbeNow()) {
+    return Promise.reject(new Error('主动消息 Worker 刚刚连不上，已暂停连接重试（约 30 分钟后自动恢复，或点「重新连接」立即重试）。'));
+  }
   const key = `${config.workerUrl}|${config.userId}|${config.serverToken ?? ''}`;
   if (cachedClientEntry?.key === key) return cachedClientEntry.promise;
   const promise = createAndInitClient(config);
@@ -1905,6 +1946,9 @@ export const ActiveMsgClient = {
   // （Dashboard 粘贴部署的用户不用碰 SQL），再拿一次 user key 验证地址与鉴权都通，
   // 最后把推送订阅补登记上去（换 worker 后云端那份是空的，见 reconcilePushSubscription）。
   async connect() {
+    // 用户显式点了「重新连接并验证」——这是「我怀疑现在又通了」的主动动作，
+    // 冷却窗必须让路，否则点一下被自己的冷却挡回来，看起来像没反应。
+    clearAmsgProbeCooldown();
     const config = await ensureWorkerReady();
 
     // 先问 worker 配齐了没：缺 D1 绑定或 master key 的话，下面的 init-tenant 必然失败，
@@ -2421,6 +2465,8 @@ export const ActiveMsgClient = {
    * 缓存本身只为省掉「一轮里连着提交好几个 job」时的重复请求——这类任务几十轮才跑一次。
    */
   async probeBackgroundJobSupportDetailed(): Promise<BackgroundJobProbeOutcome> {
+    // 冷却窗内不打网：「后台任务支不支持」结论是缓存的，别发这一轮探针
+    if (shouldSkipProbeNow()) return 'unknown';
     let config: ActiveMsg2GlobalConfig;
     try {
       config = await ensureWorkerReady();
@@ -2920,6 +2966,11 @@ export const ActiveMsgClient = {
    * 否则一条连不上的线路会把用户按在发送键上干等。
    */
   async probeInstantChatSupportDetailed(options?: { timeoutMs?: number }): Promise<InstantChatProbeResult> {
+    // 冷却窗内不打网：这轮什么都不是——保持上一次的结论存量不动（unknown 不吞真答案。
+    // 筑索懒起来时给回落成「本轮啥都没问」口径）
+    if (shouldSkipProbeNow()) {
+      return { outcome: 'unknown', supported: undefined };
+    }
     let previous: boolean | undefined;
     try {
       previous = (await ActiveMsgStore.getGlobalConfig()).instantChatSupported;
@@ -2974,6 +3025,13 @@ export const ActiveMsgClient = {
    * 探不到（老 worker 没这个端点、网络不通）一律 false：老路在哪台 worker 上都能跑。
    */
   async probeLlmCredentialsSupport(): Promise<boolean> {
+    // 冷却窗内不打网：凭据检查结果只影响之后的策略，冷却中维持现状
+    if (shouldSkipProbeNow()) {
+      try {
+        const prev = await ActiveMsgStore.getGlobalConfig();
+        return !!prev.llmCredentialsSupported;
+      } catch { return false; }
+    }
     let supported = false;
     try {
       const capabilities = await this.getCapabilities();

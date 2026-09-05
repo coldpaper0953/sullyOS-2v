@@ -135,7 +135,8 @@ export const describeGithubUploadTransportFailure = (
     }
     return `${prefix}。当前正在直连 GitHub 附件域名 uploads.github.com；它与 github.com、api.github.com 是不同线路。`
         + '能打开 GitHub、Token 测试通过或开着梯子，都不代表附件域名已被代理接管；请到「GitHub 备份 → 高级选项」'
-        + '开启“应用内 Cloudflare 中转”后重试。';
+        + '开启“应用内 Cloudflare 中转”后重试。若手机与 PC 在同一网络，也可在云端备份区直接切换「本地后端 git 仓库」'
+        + '——它不经过 uploads.github.com，上传不依赖 GitHub 的线路。';
 };
 
 const authHeaders = (token: string, extra: Record<string, string> = {}): Record<string, string> => ({
