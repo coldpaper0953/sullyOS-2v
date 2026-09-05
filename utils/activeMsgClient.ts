@@ -2966,16 +2966,16 @@ export const ActiveMsgClient = {
    * 否则一条连不上的线路会把用户按在发送键上干等。
    */
   async probeInstantChatSupportDetailed(options?: { timeoutMs?: number }): Promise<InstantChatProbeResult> {
-    // 冷却窗内不打网：这轮什么都不是——保持上一次的结论存量不动（unknown 不吞真答案。
-    // 筑索懒起来时给回落成「本轮啥都没问」口径）
-    if (shouldSkipProbeNow()) {
-      return { outcome: 'unknown', supported: undefined };
-    }
+    // 冷却窗内不打网：拿探测前那份存量原样交回（跟下方 unknown 分支同一口径），
+    // 别让上层把「没问」误判成「不支持」——那会把发消息永久降级到本地生成。
     let previous: boolean | undefined;
     try {
       previous = (await ActiveMsgStore.getGlobalConfig()).instantChatSupported;
     } catch {
       previous = undefined;
+    }
+    if (shouldSkipProbeNow()) {
+      return { outcome: 'unknown', supported: previous };
     }
     let outcome: InstantChatProbeOutcome = 'unknown';
     try {
