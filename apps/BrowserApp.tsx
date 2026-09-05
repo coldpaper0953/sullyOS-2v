@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { processImage } from '../utils/file';
 import { safeResponseJson } from '../utils/safeApi';
+import { sanitizeSearchHtml } from '../utils/sanitizeSearchHtml';
 import Modal from '../components/os/Modal';
 import { Camera, ImageSquare, GlobeSimple, MagnifyingGlass, Lightning } from '@phosphor-icons/react';
 
@@ -368,11 +369,12 @@ Generate realistic results linking to hypothetical URLs.`;
                             <div className="flex gap-4">
                                 <div className="flex-1 min-w-0">
                                     <h3 className="text-sm font-bold text-blue-600 mb-1.5 leading-snug line-clamp-2 hover:underline">{item.title}</h3>
-                                    <p className="text-xs text-slate-600 leading-relaxed line-clamp-3">
-                                        {item.age && <span className="text-slate-400 mr-1">{item.age} —</span>}
-                                        {/* Use raw HTML description from Brave to keep bolding tags */}
-                                        <span dangerouslySetInnerHTML={{ __html: item.description }} />
-                                    </p>
+    <p className="text-xs text-slate-600 leading-relaxed line-clamp-3">
+        {item.age && <span className="text-slate-400 mr-1">{item.age} —</span>}
+        {/* 搜索结果 HTML（Brave 供的原文，攻击者可影响）先过白名单净化：
+            只留 b/strong/em/i/br，其余标签剥光，不进任何 on* 属性。 */}
+        <span dangerouslySetInnerHTML={{ __html: sanitizeSearchHtml(item.description) }} />
+    </p>
                                 </div>
                                 {item.thumbnail?.src && (
                                     <img src={item.thumbnail.src} className="w-24 h-24 object-cover rounded-lg bg-slate-50 shrink-0 border border-slate-100" loading="lazy" />

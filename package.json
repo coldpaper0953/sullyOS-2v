@@ -12,7 +12,8 @@
     "cap:android": "cap open android",
     "build:workers": "node scripts/build-workers.mjs",
     "test": "vitest",
-    "test:run": "vitest run"
+    "test:run": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@capacitor-community/speech-recognition": "^6.0.1",

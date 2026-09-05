@@ -2,6 +2,8 @@ const DOMESTIC_BASE = 'https://api.minimaxi.com';
 const OVERSEAS_BASE = 'https://api.minimax.io';
 const UPLOAD_PATH = '/v1/files/upload';
 
+import { permitEnvApiKey } from '../_relayAuth';
+
 const resolveTargetUrl = (req: any): string => {
   const header = typeof req?.headers?.['x-minimax-region'] === 'string'
     ? req.headers['x-minimax-region'].trim().toLowerCase()
@@ -45,7 +47,9 @@ export default async function handler(req: any, res: any) {
 
     const incomingApiKey = normalizeApiKey(incomingAuthRaw);
     const customApiKey = normalizeApiKey(customApiKeyRaw);
-    const envApiKey = normalizeApiKey(envApiKeyRaw);
+    // 环境变量里的部署者 key 只在请求带对 `x-sully-relay-token`（对应环境变量
+    // SULLY_RELAY_TOKEN）时放出；不带头 = 必须用调用方自己的 key，防公共部署被白嫖。
+    const envApiKey = permitEnvApiKey(req) ? normalizeApiKey(envApiKeyRaw) : '';
     const finalApiKey = incomingApiKey || customApiKey || envApiKey;
 
     if (!finalApiKey) {

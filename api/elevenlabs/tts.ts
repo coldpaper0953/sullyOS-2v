@@ -5,6 +5,8 @@
 const ELEVENLABS_BASE = 'https://api.elevenlabs.io/v1/text-to-speech';
 const DEFAULT_OUTPUT_FORMAT = 'mp3_44100_128';
 
+import { permitEnvApiKey } from '../_relayAuth';
+
 function setCors(res: any) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
@@ -39,7 +41,9 @@ export default async function handler(req: any, res: any) {
 
   try {
     const incomingKey = typeof req.headers['xi-api-key'] === 'string' ? req.headers['xi-api-key'] : '';
-    const envKey = typeof process.env.ELEVENLABS_API_KEY === 'string' ? process.env.ELEVENLABS_API_KEY : '';
+    const envKeyRaw = typeof process.env.ELEVENLABS_API_KEY === 'string' ? process.env.ELEVENLABS_API_KEY : '';
+    // 部署者环境密钥只在请求带对 `x-sully-relay-token` 时放出
+    const envKey = permitEnvApiKey(req) ? envKeyRaw : '';
     const apiKey = normalizeApiKey(incomingKey) || normalizeApiKey(envKey);
     const voiceId = normalizeVoiceId(req.query?.voice_id);
     const outputFormat = normalizeOutputFormat(req.query?.output_format);

@@ -2,6 +2,8 @@ const DOMESTIC_BASE = 'https://api.minimaxi.com';
 const OVERSEAS_BASE = 'https://api.minimax.io';
 const T2A_PATH = '/v1/t2a_v2';
 
+import { permitEnvApiKey } from '../_relayAuth';
+
 const resolveTargetUrl = (req: any): string => {
   const header = typeof req?.headers?.['x-minimax-region'] === 'string'
     ? req.headers['x-minimax-region'].trim().toLowerCase()
@@ -52,7 +54,9 @@ export default async function handler(req: any, res: any) {
 
     const incomingApiKey = normalizeApiKey(incomingAuthRaw);
     const customApiKey = normalizeApiKey(customApiKeyRaw);
-    const envApiKey = normalizeApiKey(envApiKeyRaw);
+    // 环境变量里的部署者 key 必须过门禁：只有带对中继 token 的请求才能蹭它，
+    // 否则这个 API 就成了公开免费代理。默认不设 SULLY_RELAY_TOKEN 时放行（本地/旧链路兼容）。
+    const envApiKey = permitEnvApiKey(req) ? normalizeApiKey(envApiKeyRaw) : '';
     const finalApiKey = incomingApiKey || customApiKey || envApiKey;
 
     if (!finalApiKey) {
