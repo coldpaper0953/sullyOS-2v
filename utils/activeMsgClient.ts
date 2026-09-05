@@ -3090,6 +3090,8 @@ export const ActiveMsgClient = {
     expected: string;
   }> {
     const expected = AMSG_BUNDLE_VERSION;
+    // 冷却窗内不打网：版本探测是设置页/检查入口的被动动作，别为一个值再白挂几十秒
+    if (shouldSkipProbeNow()) return { state: 'unknown', deployed: null, expected };
     try {
       const config = await ensureWorkerReady();
       const { status, body } = await fetchWithAuthRaw('config-check', config, { method: 'GET' }, '后端版本探测');
@@ -3146,6 +3148,8 @@ export const ActiveMsgClient = {
   },
 
   async getCapabilities(): Promise<{ serverVersion: string; features: string[] } | null> {
+    // 冷却窗内不打网：/capabilities 是设置页的被动探测，别为它白挂一次
+    if (shouldSkipProbeNow()) return null;
     const globalConfig = await ensureWorkerReady();
     const client = createClient(globalConfig);
     return client.getCapabilities();
